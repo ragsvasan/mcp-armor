@@ -88,6 +88,30 @@ The threat taxonomy, CoSAI whitepaper context, and panel decisions all live in `
 
 ---
 
+## Relationship to cosai-mcp P10–P13
+
+`cosai-mcp` (the black-box scanner at `~/CoSAI`) and mcp-armor are complementary halves of the same defense posture: the scanner probes from outside and finds what's missing; mcp-armor's engines are the in-process fixes that close those gaps. When cosai-mcp P12 generates a remediation tab for a finding, it points directly to mcp-armor configuration. When an operator installs mcp-armor and configures it correctly, every cosai-mcp P13 adversarial probe against that server should produce PASS (or INCONCLUSIVE), not FINDING. The table below maps each P13 adversarial probe to the specific mcp-armor engine and capability required, along with current implementation status.
+
+**Important:** P13 adversarial probes test the MCP SERVER, not mcp-armor directly. mcp-armor sits inside the server and intercepts the probe payloads before they reach handler logic. A correctly configured mcp-armor installation causes each probe to hit a `CoSAIException` and return a JSON-RPC error — which the probe scores as PASS.
+
+| cosai-mcp probe | Proves | mcp-armor defense | Engine | Status |
+|-----------------|--------|-------------------|--------|--------|
+| T3-ADV-001 | Injection reaches output path via schema-conformant payload | Recursive RE2 value scan on all string-valued arguments (not just schema conformance check) | `ValidationEngine` | P1c planned — must explicitly be value-level recursive scan |
+| T4-ADV-001 | LLM influenced via prompt injection in tool call argument | Prompt injection pattern scan on `tools/call` argument values (not only tool definitions + responses) | `BoundaryEngine` | Missing — new P4e gap |
+| T5-ADV-001 | Cross-tenant canary written in session A readable in session B | Tenant context binding: each response tagged to originating session; bleed raises `PIILeakError` | `ProtectionEngine` | T5-003 Not implemented |
+| T7-ADV-001 | Session token from session A replayed successfully in session B | Server-generated nonce bound to `Mcp-Session-Id`; replay raises `SessionError` | `SessionEngine` | Complete stub — P4c |
+| T11-ADV-001 | Unicode homoglyph tool name (`tooIs_list`) accepted as valid | NFKC normalization before allowlist comparison; homoglyph match raises `SupplyChainError` | `SupplyChainEngine` | Partial (allowlist + Levenshtein planned) — P4d needs homoglyph addition |
+
+### What needs to be built (additions from P13)
+
+- **P4e — BoundaryEngine call-arg prompt injection scan:** `BoundaryEngine.on_request()` currently scans tool definitions (at session open) and responses. It does NOT scan tool call arguments. This is the gap T4-ADV-001 exposes. See workplan.md P4e for full scope.
+- **P4c — SessionEngine nonce:** server-generated nonce at `on_session_start` bound to `Mcp-Session-Id`; any request with a non-matching Session-Id raises `SessionError`. Defends T7-ADV-001.
+- **P4d — SupplyChainEngine homoglyph detection:** NFKC-normalize all tool names before allowlist comparison. Levenshtein alone misses Unicode lookalikes. Defends T11-ADV-001.
+- **P4b — IntegrityEngine homoglyph detection:** normalize tool names to NFKC before comparison; reject any tool name that NFKC-normalizes to a name already in the manifest or allowlist (tool shadowing via Unicode).
+- **P10 — cosai-mcp integration layer:** `docs/COSAI_MCP_REMEDIATION.md` mapping every probe ID to a `cosai.yaml` snippet, plus an adversarial test harness in `tests/conftest.py` that exercises the exact payloads P13 sends.
+
+---
+
 ## Workplan Summary
 
 See `docs/workplan.md` for the full dependency graph. Short version:
@@ -100,6 +124,8 @@ See `docs/workplan.md` for the full dependency graph. Short version:
 - **P5** FastMCP adapter (pending stable FastMCP middleware API)
 - **P6** Full test suite (95% coverage, all 40 sub-threats tested)
 - **P7** CI/CD + PyPI
+- **P8** Examples + docs polish
+- **P9 (future / unscheduled)** TypeScript/Node adapter — needed by VitalSync (`~/vitalsync`) which is a Node.js MCP server. VitalSync is implementing controls natively in TypeScript for now (see `~/vitalsync/MCP_COSAI_T1T12_DESIGN.md`). If a TS adapter ships, VitalSync can adopt it as a drop-in; native controls are compatible with the same spec.
 - **P8** Examples + docs polish
 
 ---

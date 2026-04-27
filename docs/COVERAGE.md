@@ -9,20 +9,20 @@ This is the authoritative record of what is implemented, what is stubbed, and wh
 
 ## Coverage Matrix
 
-| # | Category | Engine | Status | Layer | Notes |
-|---|----------|--------|--------|-------|-------|
-| T1 | Improper Authentication | `AuthEngine` | **Partial** | Transport | Header presence check done; JWT sig, JTI replay, DPoP → P1b |
-| T2 | Missing Access Control | `AuthzEngine` | **Stub** | Dispatch | Tool policy lookup done; scope claim comparison → P4a |
-| T3 | Input Validation Failures | `ValidationEngine` | **Stub** | Dispatch | Size limit done; JSON schema + injection → P1c |
-| T4 | Data/Control Boundary | `BoundaryEngine` | **Partial** | Dispatch + Response | 18 patterns compiled; definition scan at session open → P1a |
-| T5 | Inadequate Data Protection | `ProtectionEngine` | **Partial** | Response | 5 RE2 profiles compiled; blocks on match; no scrub/redact yet |
-| T6 | Integrity/Verification | `IntegrityEngine` | **Partial** | Dispatch | Manifest hash + drift check done; Levenshtein → P4b |
-| T7 | Session Security Failures | `SessionEngine` | **Stub** | Transport | All hooks return ctx; implementation → P4c |
-| T8 | Network Binding Failures | `NetworkEngine` | **Partial** | Startup | `check_bind_address()` + `is_ssrf_target()` done; guard must call these |
-| T9 | Trust Boundary Failures | `TrustEngine` | **Partial** | Response | `sanitize()` 5-step pipeline done; fix `strip_injections` typo → P1d |
-| T10 | Resource Management | `ResourceEngine` | **Partial** | Dispatch | Call count + wall-clock + loop depth done; heartbeat → P1e |
-| T11 | Supply Chain/Lifecycle | `SupplyChainEngine` | **Partial** | Startup | `validate_tools()` allowlist check done; Levenshtein + sig → P4d |
-| T12 | Insufficient Logging | `AuditEngine` | **Partial** | All | Hash-chain + DAG done; race condition in `_write()` → P1 fix |
+| # | Category | Engine | Status | Layer | cosai-mcp adversarial probe | Notes |
+|---|----------|--------|--------|-------|-----------------------------|-------|
+| T1 | Improper Authentication | `AuthEngine` | **Partial** | Transport | — | Header presence check done; JWT sig, JTI replay, DPoP → P1b |
+| T2 | Missing Access Control | `AuthzEngine` | **Stub** | Dispatch | — | Tool policy lookup done; scope claim comparison → P4a |
+| T3 | Input Validation Failures | `ValidationEngine` | **Stub** | Dispatch | → T3-ADV-001 | Size limit done; JSON schema + injection → P1c (must be value-level recursive scan) |
+| T4 | Data/Control Boundary | `BoundaryEngine` | **Partial** | Dispatch + Response | → T4-ADV-001 | 18 patterns compiled; definition scan at session open → P1a; call-arg scan → P4e |
+| T5 | Inadequate Data Protection | `ProtectionEngine` | **Partial** | Response | → T5-ADV-001 | 5 RE2 profiles compiled; blocks on match; no scrub/redact; tenant context binding not implemented |
+| T6 | Integrity/Verification | `IntegrityEngine` | **Partial** | Dispatch | — | Manifest hash + drift check done; Levenshtein → P4b; homoglyph → P4b |
+| T7 | Session Security Failures | `SessionEngine` | **Stub** | Transport | → T7-ADV-001 | All hooks return ctx; server nonce + replay rejection → P4c |
+| T8 | Network Binding Failures | `NetworkEngine` | **Partial** | Startup | — | `check_bind_address()` + `is_ssrf_target()` done; guard must call these |
+| T9 | Trust Boundary Failures | `TrustEngine` | **Partial** | Response | — | `sanitize()` 5-step pipeline done; fix `strip_injections` typo → P1d |
+| T10 | Resource Management | `ResourceEngine` | **Partial** | Dispatch | — | Call count + wall-clock + loop depth done; heartbeat → P1e |
+| T11 | Supply Chain/Lifecycle | `SupplyChainEngine` | **Partial** | Startup | → T11-ADV-001 | `validate_tools()` allowlist check done; Levenshtein + sig → P4d; homoglyph → P4d |
+| T12 | Insufficient Logging | `AuditEngine` | **Partial** | All | — | Hash-chain + DAG done; race condition in `_write()` → P1 fix |
 
 **Legend:** done = implemented and tested · partial = some logic present, gaps identified · stub = file exists, no meaningful logic
 
@@ -121,9 +121,10 @@ This is the authoritative record of what is implemented, what is stubbed, and wh
 | SQL injection | T3-004 | Stub |
 | Injection in tool definition | T4-001 | Done (18 patterns) |
 | Injection in tool response | T4-002 | Done |
+| Prompt injection in tool call arguments | T4-005 | Not implemented (→ P4e) |
 | SSN / CC / PII in response | T5-001 | Done (blocks; no redact) |
 | JWT / API key in response | T5-002 | Done |
-| Foreign session context bleed | T5-003 | Not implemented |
+| Foreign session context bleed | T5-003 | Not implemented — defends against T5-ADV-001 (cosai-mcp P13) |
 | Mid-session tool mutation | T6-001 | Done (hash drift detection) |
 | Tool typosquatting | T6-002 | Partial (Levenshtein impl; no probe call) |
 | Tool shadowing | T6-003 | Not implemented |
@@ -145,7 +146,27 @@ This is the authoritative record of what is implemented, what is stubbed, and wh
 | Typosquatted package | T11-002 | Not implemented |
 | Unsigned tool from registry | T11-003 | Not implemented |
 | Dependency confusion | T11-004 | Not implemented |
+| Unicode homoglyph tool name | T11-005 | Partial (→ P4d homoglyph addition) — defends against T11-ADV-001 (cosai-mcp P13) |
 | No execution trace | T12-001 | Done |
 | Log tampering | T12-002 | Done (chain verify) |
 | PII in logs | T12-003 | Done (digest only) |
 | Missing DAG parent | T12-004 | Done |
+
+---
+
+## cosai-mcp Adversarial Probe Defense Matrix
+
+Maps cosai-mcp P13 adversarial probes to the mcp-armor engine that defends them, the required `cosai.yaml` configuration, and current status. When mcp-armor is correctly installed and configured, each probe should produce **PASS** (probe sent, `CoSAIException` returned — server defended) rather than **FINDING**.
+
+| cosai-mcp probe | What it proves | mcp-armor engine | Required cosai.yaml config | Status |
+|-----------------|----------------|------------------|---------------------------|--------|
+| **T3-ADV-001** (injection canary in schema-conformant value) | Injection payload in a valid string param reaches output path | `ValidationEngine` | `validation.injection_scan: true` | Planned (P1c — must confirm value-level recursive scan, not only schema conformance) |
+| **T4-ADV-001** (prompt injection via tool call parameter) | LLM influenced via `"Ignore previous instructions..."` in a real tool call arg | `BoundaryEngine` | `boundary.scan_call_args: true` (new option → P4e) | Gap — not implemented (→ P4e) |
+| **T5-ADV-001** (cross-tenant canary leak, stateful) | Canary written in session A appears in session B response | `ProtectionEngine` | `protection.tenant_binding: true` (→ future) | Not implemented (T5-003) |
+| **T7-ADV-001** (session token replay across sessions) | `Mcp-Session-Id` captured from session A succeeds in session B | `SessionEngine` | `session.nonce_required: true` (→ P4c) | Complete stub (→ P4c) |
+| **T11-ADV-001** (Unicode homoglyph tool name) | `tooIs_list` (capital I) accepted as a valid tool name | `SupplyChainEngine` | `supply_chain.tool_allowlist: [tools_list, ...]` + homoglyph check | Partial (→ P4d homoglyph addition) |
+
+**Legend:**
+- **PASS** — probe payload sent; mcp-armor intercepted and raised `CoSAIException`; server returned JSON-RPC error; probe scored as defended
+- **FINDING** — probe payload reached handler logic; mcp-armor did not defend; gap confirmed
+- **INCONCLUSIVE** — probe could not determine outcome (e.g. server returned generic error unrelated to mcp-armor)
