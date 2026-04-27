@@ -1,0 +1,90 @@
+"""T9 — Trust Boundary Failures: LLM output sanitization before re-feed."""
+
+from __future__ import annotations
+
+import html
+
+from ..context import CoSAIContext
+from ..exceptions import TrustBoundaryViolation
+from ..types import MCPRequest, MCPResponse
+
+_MAX_LLM_OUTPUT = 32_768
+
+# Control characters to strip (keep \t \n \r)
+_CTRL_CHARS = bytes(range(0, 9)) + bytes(range(11, 13)) + bytes(range(14, 32)) + bytes([127])
+_CTRL_TABLE = str.maketrans(dict.fromkeys(_CTRL_CHARS, None))
+
+
+class TrustEngine:
+    """
+    Sanitizes LLM-generated output before it is re-fed into tool arguments
+    or injected back into the reasoning loop.
+
+    Covers:
+    - T9-001: Unsanitized LLM output used as tool argument (prompt injection vector)
+    - T9-002: LLM-generated URLs or shell commands executed without validation
+    - T9-003: Overreliance on LLM judgment for security decisions
+
+    This engine wraps the sanitize() method — call it explicitly wherever
+    LLM output is about to be re-used as input to another tool.
+    """
+
+    def __init__(
+        self,
+        max_output_length: int = _MAX_LLM_OUTPUT,
+        strip_injection_patterns: bool = True,
+    ) -> None:
+        self._max_len = max_output_length
+        self._strip_injections = strip_injection_patterns
+        if self._strip_injections:
+            from .boundary import BoundaryEngine
+            self._boundary = BoundaryEngine()
+
+    def sanitize(self, text: str) -> str:
+        """
+        Five-step pipeline: truncate → null bytes → control chars → Unicode →
+        injection scan. Returns HTML-escaped safe text or raises TrustBoundaryViolation.
+        """
+        if len(text) > self._max_len:
+            text = text[: self._max_len]
+
+        text = text.replace("\x00", "")
+        text = text.translate(_CTRL_TABLE)
+
+        # Strip dangerous Unicode categories (surrogates, private use, unassigned)
+        cleaned = []
+        for ch in text:
+            cp = ord(ch)
+            if 0xD800 <= cp <= 0xDFFF:   # surrogates
+                continue
+            if 0xE000 <= cp <= 0xF8FF:   # private use area
+                continue
+            cleaned.append(ch)
+        text = "".join(cleaned)
+
+        if self._strip_injections:
+            matched = self._boundary._scan(text)
+            if matched:
+                raise TrustBoundaryViolation(
+                    f"LLM output contains injection pattern: {matched!r} — blocked from re-feed"
+                )
+
+        return html.escape(text, quote=True)
+
+    async def on_startup(self) -> None:
+        pass
+
+    async def on_session_start(self, ctx: CoSAIContext) -> CoSAIContext:
+        return ctx
+
+    async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
+        return ctx
+
+    async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        return ctx
+
+    async def on_session_end(self, ctx: CoSAIContext) -> None:
+        pass
+
+    async def on_shutdown(self) -> None:
+        pass

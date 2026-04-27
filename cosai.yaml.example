@@ -1,0 +1,66 @@
+version: 1
+
+threats:
+  T1:
+    enabled: true
+    require_dpop: true
+    jti_cache_size: 10000
+    token_expiry_max_secs: 3600
+
+  T2:
+    enabled: true
+    default_policy: deny              # fail-closed — unlisted tools are denied
+    tool_policies:
+      query_db:    [read:public]
+      admin_reset: [admin]
+
+  T3:
+    enabled: true
+    max_payload_bytes: 65536
+    strict_schema: true
+
+  T4:
+    enabled: true
+    scan_definitions: true
+    scan_responses: true
+
+  T5:
+    enabled: true
+    profile: pci                      # minimal | pci | hipaa | gdpr | strict
+
+  T6:
+    enabled: true
+    baseline_on_initialize: true
+    fail_on_drift: true
+
+  T7:
+    enabled: true
+    bind_session_to_dpop: true
+
+  T8:
+    enabled: true
+    allow_public_bind: false          # 0.0.0.0 → error at startup
+    block_rfc1918: true
+
+  T9:
+    enabled: true
+    max_output_length: 32768
+    strip_injection_patterns: true
+
+  T10:
+    enabled: true
+    max_calls_per_session: 100
+    max_wall_clock_secs: 300
+    loop_depth_limit: 10
+    heartbeat_interval_secs: 30
+
+  T11:
+    enabled: true
+    tool_allowlist: []                # empty list = deny all unlisted tools
+    require_registry_signature: false
+
+  T12:
+    enabled: true
+    path: /var/log/mcp-armor/audit.jsonl
+    log_params_as_digest: true
+    chain_verify_on_startup: true
