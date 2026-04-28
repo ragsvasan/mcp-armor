@@ -165,9 +165,13 @@ threats:
   T2:
     enabled: true
     default_policy: deny              # fail-closed — unlisted tools are denied
+    destructive_token_ttl_seconds: 60 # confirmation token lifetime for two-stage commit
     tool_policies:
       query_db:   [read:public]
       admin_reset: [admin]
+      delete_resource:                # destructive tool — two-stage commit enforced
+        required_scopes: [admin]
+        destructive: true             # any call without confirm_token → AuthorizationError
 
   T3:
     enabled: true

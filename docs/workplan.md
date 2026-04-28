@@ -172,6 +172,11 @@ P1 ‖ P2 → P3 → (P4 ‖ P5) → P6 → P7 → P8 → [P9 unscheduled] → P
 - Confused deputy check: if request is server-to-server (no user claim), reject tools marked `user-only`
 - Multi-tenant isolation: assert `ctx.tenant_id` matches tenant embedded in tool arguments (configurable per tool)
 - **cosai-mcp P11 note:** Tool policy names in `cosai.yaml` must match the server's REAL tool names. cosai-mcp's P11 server profiles map catalog placeholder names (e.g. `admin_delete`) to real server tool names (e.g. `purge_records`); mcp-armor's `tool_policies` must use the real names to be effective. Add a validation at `from_config()` time that warns (log at WARNING level) when a `tool_policies` entry has no matching tool in the current manifest discovered via `tools/list`.
+- **Destructive tool enforcement (cosai-mcp T02-003):** For tools configured as `destructive: true` in `tool_policies`, mcp-armor enforces the two-stage commit gate:
+  - Any `tools/call` to a destructive tool WITHOUT a `confirm_token` field in arguments → `AuthorizationError(severity=CRITICAL, code="destructive_no_token")`
+  - `confirm_token` is validated against the in-session pending-token store (set by the plan step); invalid or expired token → `AuthorizationError`
+  - `cosai.yaml` config: `authz.tool_policies.<tool_name>.destructive: true` — marks the tool; `authz.destructive_token_ttl_seconds: 60` (default)
+  - **Multi-worker safety:** the pending-token store MUST be backed by the session store backend (Redis/DB), not an in-process dict. If `session.backend: memory` is configured, log WARNING that destructive enforcement is single-process only.
 - **Panel: T1** (new access control logic)
 
 ### P4b — T6 IntegrityEngine
@@ -351,6 +356,7 @@ Maps every cosai-mcp probe ID to the mcp-armor `cosai.yaml` configuration that d
 | T01-003-p1/p2 | JTI replay accepted | `auth.jti_cache_ttl_seconds: 300` |
 | T01-004-p1/p2 | DPoP not enforced | `auth.require_dpop: true` |
 | T02-001-p1/p2 | No per-tool authz | `authz.tool_policies: { <real_tool_name>: { required_scopes: [...] } }` |
+| T02-003-p1/p2 | Destructive one-shot tool execution (no confirmation token required) | `authz.tool_policies: { <tool_name>: { destructive: true } }` — mcp-armor enforces two-stage commit gate; plan step issues token, execute step validates it |
 | T03-001/002 | Injection in params | `validation.injection_scan: true`, `validation.strict_schema: true` |
 | T06-001-p1 | Manifest drift | `integrity.track_drift: true` |
 | T06-002-p1 | Typosquatted tool | `integrity.tool_allowlist: [...]`, `integrity.levenshtein_threshold: 1` |
@@ -358,6 +364,8 @@ Maps every cosai-mcp probe ID to the mcp-armor `cosai.yaml` configuration that d
 | T08-003-p1 | Shadow server | `network.bind_check: true` |
 | T10-001/002/003 | Rate limit exceeded | `resources.max_calls_per_session: 100`, `resources.wall_clock_seconds: 300` |
 | T11-001-p1/p2 | Unknown tool accepted | `supply_chain.tool_allowlist: [...]` |
+| T12-002-p1 | tools/list inaccessible | No config — ensure scanner credentials can list tools; `audit.log_tools_list: true` |
+| T12-002-p2 (info) | Destructive tool descriptions lack irreversibility warnings | Not enforced by mcp-armor middleware — developer responsibility; add disclosure text to tool `description` fields (see cosai-mcp T12-002 remediation for required language) |
 
 **Note on tool policy names (P11 alignment):** cosai-mcp P11 server profiles map catalog placeholder names to real server tool names. The `cosai.yaml` snippets in this doc always use REAL server tool names (not catalog placeholders). Operators must match the names returned by their server's `tools/list`. The P4a validation warning assists with this.
 
