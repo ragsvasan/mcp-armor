@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import functools
+import html
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +28,8 @@ from .exceptions import CoSAIException, to_jsonrpc_error
 from .types import MCPRequest, MCPResponse
 
 log = logging.getLogger(__name__)
+
+_THREAT_ENGINE_TYPES: dict[str, type] = {}  # populated after class definitions below
 
 
 class CoSAIGuard:
@@ -230,20 +234,78 @@ class CoSAIGuard:
     def protect(
         self,
         threats: list[str] | None = None,
-        **policy_overrides: Any,
+        pii_profile: str | None = None,
     ) -> Callable:
         """
-        Per-tool decorator for fine-grained policy.
+        Per-tool decorator that applies a filtered engine subset around a single tool.
+
+        threats:     limit which CoSAI categories run (e.g. ["T3", "T5"]).
+                     All engines run when omitted.
+        pii_profile: override the T5 PII profile for this tool only
+                     ("minimal" | "pci" | "hipaa" | "gdpr" | "strict").
 
         Usage:
             @app.tool()
             @guard.protect(threats=["T3", "T5"], pii_profile="strict")
-            async def my_tool(query: str) -> str: ...
+            async def patient_lookup(mrn: str) -> str: ...
         """
+        # --- build the active engine list once at decoration time ---
+        if threats is not None:
+            unknown = set(threats) - _THREAT_ENGINE_TYPES.keys()
+            if unknown:
+                raise ValueError(f"Unknown threat codes: {sorted(unknown)!r}")
+            engine_types = tuple(_THREAT_ENGINE_TYPES[t] for t in threats)
+            active: list[ProtectionEngine] = [
+                e for e in self._engines if isinstance(e, engine_types)
+            ]
+        else:
+            active = list(self._engines)
+
+        if pii_profile is not None:
+            active = [
+                PIIEngine(profile=pii_profile) if isinstance(e, PIIEngine) else e
+                for e in active
+            ]
+
         def decorator(fn: Callable) -> Callable:
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                # TODO: apply per-tool engine subset and policy overrides
-                return await fn(*args, **kwargs)
+                from types import MappingProxyType
+                session_id = str(uuid.uuid4())
+                ctx = CoSAIContext.new(session_id, transport="stdio")
+                req = MCPRequest(
+                    method="tools/call",
+                    params=MappingProxyType({"name": fn.__name__, "arguments": kwargs}),
+                    session_id=session_id,
+                    raw_headers=MappingProxyType({}),
+                    transport="stdio",
+                )
+                for engine in active:
+                    ctx = await engine.on_request(ctx, req)
+                    set_context(ctx)
+                result = await fn(*args, **kwargs)
+                escaped = html.escape(str(result)[:65536], quote=True)
+                resp = MCPResponse(result=None, error=None, raw_body=escaped)
+                for engine in reversed(active):
+                    ctx = await engine.on_response(ctx, resp)
+                    set_context(ctx)
+                return result
             return wrapper
         return decorator
+
+
+# Populated after CoSAIGuard is defined so all engine types are importable.
+_THREAT_ENGINE_TYPES.update({
+    "T1": AuthEngine,
+    "T2": AuthzEngine,
+    "T3": ValidationEngine,
+    "T4": BoundaryEngine,
+    "T5": PIIEngine,
+    "T6": IntegrityEngine,
+    "T7": SessionEngine,
+    "T8": NetworkEngine,
+    "T9": TrustEngine,
+    "T10": ResourceEngine,
+    "T11": SupplyChainEngine,
+    "T12": AuditEngine,
+})

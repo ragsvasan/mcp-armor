@@ -227,3 +227,120 @@ async def test_wrap_dispatcher_passes_clean_request() -> None:
     result = await wrapped({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     assert "result" in result
     assert calls[0]["method"] == "tools/list"
+
+
+# ---------------------------------------------------------------------------
+# guard.protect() — per-tool policy decorator
+# ---------------------------------------------------------------------------
+
+async def test_protect_passthrough_with_no_threats() -> None:
+    """protect() with no arguments must pass through and return the result."""
+    guard = CoSAIGuard([])
+
+    @guard.protect()
+    async def my_tool(x: int) -> int:
+        return x * 2
+
+    assert await my_tool(x=5) == 10
+
+
+async def test_protect_runs_only_selected_threat_engine() -> None:
+    """protect(threats=["T5"]) must run only the T5 PIIEngine, not others."""
+    from mcp_armor.engines.protection import ProtectionEngine as PIIEngine
+    from mcp_armor.engines.boundary import BoundaryEngine
+
+    ran = []
+
+    class TrackPII(PIIEngine):
+        async def on_request(self, ctx, req):
+            ran.append("T5")
+            return ctx
+
+    class TrackBoundary(BoundaryEngine):
+        async def on_request(self, ctx, req):
+            ran.append("T4")
+            return ctx
+
+    guard = CoSAIGuard([TrackBoundary(), TrackPII()])
+
+    @guard.protect(threats=["T5"])
+    async def my_tool() -> str:
+        return "hello"
+
+    await my_tool()
+    assert ran == ["T5"]  # T4 must not fire
+
+
+async def test_protect_blocks_pii_in_response() -> None:
+    """protect(threats=["T5"]) must raise PIILeakError when SSN in response."""
+    from mcp_armor.engines.protection import ProtectionEngine as PIIEngine
+    from mcp_armor.exceptions import PIILeakError
+
+    guard = CoSAIGuard([PIIEngine(profile="pci")])
+
+    @guard.protect(threats=["T5"])
+    async def leak_ssn() -> str:
+        return "Patient SSN: 123-45-6789"
+
+    with pytest.raises(PIILeakError):
+        await leak_ssn()
+
+
+async def test_protect_pii_profile_override_catches_email() -> None:
+    """pii_profile='strict' must catch email even when guard default is 'pci'."""
+    from mcp_armor.engines.protection import ProtectionEngine as PIIEngine
+    from mcp_armor.exceptions import PIILeakError
+
+    guard = CoSAIGuard([PIIEngine(profile="pci")])  # pci does NOT catch email
+
+    @guard.protect(threats=["T5"], pii_profile="strict")
+    async def leak_email() -> str:
+        return "user@example.com"
+
+    with pytest.raises(PIILeakError):
+        await leak_email()
+
+
+async def test_protect_pci_profile_does_not_block_email() -> None:
+    """Baseline: pci profile does not flag email — confirms the override test above is meaningful."""
+    from mcp_armor.engines.protection import ProtectionEngine as PIIEngine
+
+    guard = CoSAIGuard([PIIEngine(profile="pci")])
+
+    @guard.protect(threats=["T5"])
+    async def safe_email() -> str:
+        return "user@example.com"
+
+    result = await safe_email()
+    assert result == "user@example.com"
+
+
+def test_protect_unknown_threat_code_raises_at_decoration_time() -> None:
+    """protect(threats=["T99"]) must raise ValueError immediately, not at call time."""
+    guard = CoSAIGuard([])
+
+    with pytest.raises(ValueError, match="T99"):
+        @guard.protect(threats=["T99"])
+        async def my_tool() -> str:
+            return "x"
+
+
+async def test_protect_all_threats_run_when_none_specified() -> None:
+    """protect() with no threats= uses all engines in the guard."""
+    from mcp_armor.engines.boundary import BoundaryEngine
+
+    ran = []
+
+    class TrackBoundary(BoundaryEngine):
+        async def on_request(self, ctx, req):
+            ran.append("T4")
+            return ctx
+
+    guard = CoSAIGuard([TrackBoundary()])
+
+    @guard.protect()
+    async def my_tool() -> str:
+        return "hello"
+
+    await my_tool()
+    assert ran == ["T4"]
