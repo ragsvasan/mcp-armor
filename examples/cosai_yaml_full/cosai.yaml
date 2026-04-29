@@ -1,0 +1,104 @@
+# mcp-armor full cosai.yaml — all 12 CoSAI threat controls configured
+# Copy this to your project root and adjust per your deployment requirements.
+version: 1
+
+threats:
+  # T1 — Authentication failures
+  T1:
+    enabled: true
+    require_dpop: true                  # RFC 9449 DPoP sender-binding (recommended)
+    jti_cache_size: 10000               # JTI replay cache capacity
+    token_expiry_max_secs: 3600         # Reject tokens older than 1 hour
+    issuer: "https://auth.example.com"  # Expected JWT issuer
+    audience: "mcp-server"             # Expected JWT audience
+    dpop_max_age_secs: 30
+    dpop_future_skew_secs: 5
+
+  # T2 — Authorization failures (RBAC, confused deputy, tenant isolation)
+  T2:
+    enabled: true
+    default_policy: deny               # default-deny; unlisted tools are blocked
+    destructive_token_ttl_seconds: 60  # Two-stage commit token TTL
+    tool_policies:
+      delete_record:
+        required_scopes: ["data:write", "admin"]
+        destructive: true
+        tenant_isolated: true
+      read_record:
+        required_scopes: ["data:read"]
+        tenant_isolated: true
+      send_notification:
+        required_scopes: ["notify:send"]
+        user_only: true
+
+  # T3 — Input validation
+  T3:
+    enabled: true
+    max_payload_bytes: 65536
+    strict_schema: true
+
+  # T4 — Boundary / injection detection
+  T4:
+    enabled: true
+    scan_definitions: true
+    scan_responses: true
+    scan_call_args: true
+
+  # T5 — PII / data protection
+  T5:
+    enabled: true
+    profile: "hipaa"   # Options: minimal | pci | hipaa | gdpr | strict
+
+  # T6 — Tool integrity / manifest drift
+  T6:
+    enabled: true
+    fail_on_drift: true
+    typosquat_distance: 2
+    tool_allowlist:
+      - read_record
+      - delete_record
+      - send_notification
+      - list_records
+
+  # T7 — Session security
+  T7:
+    enabled: true
+    bind_session_to_dpop: true  # Requires DPoP-bound session tokens
+
+  # T8 — Network binding
+  T8:
+    enabled: true
+    allow_public_bind: false    # Reject 0.0.0.0 binds
+    block_rfc1918: true         # Block SSRF to internal ranges
+
+  # T9 — Trust boundary violations (LLM output sanitization)
+  T9:
+    enabled: true
+    max_output_length: 32768
+    strip_injection_patterns: true
+
+  # T10 — Resource management (budget enforcement)
+  T10:
+    enabled: true
+    max_calls_per_session: 100
+    max_wall_clock_secs: 300
+    loop_depth_limit: 10
+    heartbeat_interval_secs: 30
+
+  # T11 — Supply chain (tool allowlist + registry signatures)
+  T11:
+    enabled: true
+    levenshtein_threshold: 1
+    require_registry_signature: false   # Set true when registry_public_key is configured
+    tool_allowlist:
+      - read_record
+      - delete_record
+      - send_notification
+      - list_records
+
+  # T12 — Audit logging (tamper-evident, hash-chained)
+  T12:
+    enabled: true
+    path: "/var/log/mcp-armor/audit.jsonl"
+    log_params_as_digest: true      # Never log raw params — SHA-256 digest only
+    chain_verify_on_startup: true   # Verify audit chain integrity at startup
