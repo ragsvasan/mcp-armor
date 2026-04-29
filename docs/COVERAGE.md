@@ -1,10 +1,15 @@
 # mcp-armor — Coverage Status
 
 **Version:** 0.1.0  
-**Date:** 2026-04-28  
-**Tests:** 336 passing · Coverage: 90%+
+**Date:** 2026-04-29  
+**Tests:** 441 passing · Coverage: 90%+
 
 All 12 CoSAI threat engines are fully implemented and tested. No stubs remain.
+
+A dedicated adversarial integration suite (`tests/adversarial/`) exercises the full
+public deployment path — `ArmorMiddleware` and `wrap_dispatcher` — not engine unit
+internals alone. Every documented threat claim has at least one end-to-end test that
+asserts the client receives only an opaque error, never the sensitive or injected body.
 
 ---
 
@@ -112,8 +117,11 @@ other language servers, use the HTTP sidecar proxy pattern described in
 ## Running the test suite
 
 ```bash
-# Full suite:
+# Full suite (unit + adapter + adversarial):
 pytest tests/ -q
+
+# Adversarial integration tests only:
+pytest tests/adversarial/ -v
 
 # Security regression tests only:
 pytest tests/ -q -k "regression"
@@ -121,3 +129,17 @@ pytest tests/ -q -k "regression"
 # With coverage gate (CI enforces 88%):
 pytest tests/ --cov=mcp_armor --cov-fail-under=88
 ```
+
+## Adversarial integration suite
+
+`tests/adversarial/test_integration.py` (50 tests) covers six areas the Codex review
+identified as integration-coverage gaps:
+
+| Area | Tests | What is asserted |
+|------|-------|-----------------|
+| Response blocking (Finding 1) | 7 | SSN / JWT / API key / CC / prompt injection in upstream response — client gets opaque error, sensitive body absent from reply |
+| `tools/list` enforcement (Finding 2) | 8 | Unallowlisted, typosquatted, homoglyph, duplicate, unsigned, drifted manifests blocked through middleware and dispatcher |
+| SSRF via `tools/call` (Finding 3) | 9 | RFC1918 / loopback / link-local / localhost URLs in arguments blocked; public IPs pass |
+| `tool_allowlist` config semantics (Finding 4) | 6 | `[]` blocks all; `None` allows all; named list is exact-match |
+| Malformed JSON-RPC fuzz (Finding 6) | 11 | `[]`, `null`, `"string"`, `1`, `true`, batch, non-JSON, wrong Content-Type, oversized body, params-as-array — all return JSON-RPC errors |
+| Docs/API contract (Finding 4 + general) | 9 | `CoSAIGuard.default()` composition, `scan_responses=False`, `scan_call_args=False`, `required_scope`, PII profile semantics |
