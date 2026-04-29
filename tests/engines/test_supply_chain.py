@@ -304,3 +304,72 @@ async def test_on_request_non_tools_call_not_checked() -> None:
     req = make_request(method="tools/list", params={})
     result = await eng.on_request(ctx, req)
     assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# Codex P1: on_response intercepts tools/list for automatic manifest validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_regression_on_response_blocks_unlisted_tool_in_manifest() -> None:
+    """P1: on_response must validate tools/list response and reject unlisted tools."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine(allowlist=["allowed_tool"])
+    ctx = make_ctx()
+    resp = MCPResponse(
+        result=MappingProxyType({"tools": [{"name": "evil_tool"}]}),
+        error=None,
+        raw_body="",
+    )
+    with pytest.raises(SupplyChainError, match="not on the approved allowlist"):
+        await eng.on_response(ctx, resp)
+
+
+@pytest.mark.asyncio
+async def test_regression_on_response_passes_allowlisted_manifest() -> None:
+    """P1: on_response must pass tools/list with only allowlisted tools."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine(allowlist=["fetch_data", "list_files"])
+    ctx = make_ctx()
+    resp = MCPResponse(
+        result=MappingProxyType({"tools": [{"name": "fetch_data"}, {"name": "list_files"}]}),
+        error=None,
+        raw_body="",
+    )
+    result = await eng.on_response(ctx, resp)
+    assert result is ctx
+
+
+@pytest.mark.asyncio
+async def test_regression_on_response_no_allowlist_passes_any_manifest() -> None:
+    """P1: on_response with no allowlist configured must accept any tools/list."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine(allowlist=None)
+    ctx = make_ctx()
+    resp = MCPResponse(
+        result=MappingProxyType({"tools": [{"name": "anything"}]}),
+        error=None,
+        raw_body="",
+    )
+    result = await eng.on_response(ctx, resp)
+    assert result is ctx
+
+
+@pytest.mark.asyncio
+async def test_regression_on_response_non_tools_list_not_validated() -> None:
+    """P1: on_response must not validate responses that have no 'tools' key."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine(allowlist=["fetch_data"])
+    ctx = make_ctx()
+    # A tools/call result has no 'tools' key
+    resp = MCPResponse(
+        result=MappingProxyType({"content": "some result"}),
+        error=None,
+        raw_body="",
+    )
+    result = await eng.on_response(ctx, resp)
+    assert result is ctx

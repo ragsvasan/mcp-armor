@@ -31,7 +31,7 @@ async def test_regression_oversized_payload_raises():
 
 @pytest.mark.asyncio
 async def test_payload_within_limit_passes():
-    engine = ValidationEngine(max_payload_bytes=65_536)
+    engine = ValidationEngine(max_payload_bytes=65_536, strict_schema=False)
     ctx = make_ctx()
     req = _req("search", {"q": "hello"})
     result = await engine.on_request(ctx, req)
@@ -100,7 +100,7 @@ async def test_regression_sql_injection_blocked(value):
 
 @pytest.mark.asyncio
 async def test_clean_string_args_pass_injection_scan():
-    engine = ValidationEngine()
+    engine = ValidationEngine(strict_schema=False)
     ctx = make_ctx()
     req = _req("search", {"query": "find all widgets in category furniture"})
     result = await engine.on_request(ctx, req)
@@ -162,13 +162,13 @@ async def test_schema_wrong_type_raises():
 
 
 @pytest.mark.asyncio
-async def test_schema_not_registered_skips_validation():
-    """If no schema is registered for a tool, validation is skipped gracefully."""
+async def test_schema_not_registered_strict_mode_fails_closed():
+    """P2: strict_schema=True with unregistered tool must fail closed — not skip silently."""
     engine = ValidationEngine(strict_schema=True)
     ctx = make_ctx()
     req = _req("unknown_tool", {"anything": "goes"})
-    result = await engine.on_request(ctx, req)
-    assert result is ctx
+    with pytest.raises(ValidationError, match="no registered schema"):
+        await engine.on_request(ctx, req)
 
 
 @pytest.mark.asyncio
@@ -348,3 +348,57 @@ async def test_regression_sql_numeric_tautology_blocked(value):
     req = _req("db_query", {"q": value})
     with pytest.raises(ValidationError, match="injection"):
         await engine.on_request(ctx, req)
+
+
+# ---------------------------------------------------------------------------
+# Codex P2: strict_schema fail-closed on unregistered tools
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_regression_strict_schema_unregistered_tool_raises() -> None:
+    """P2: strict_schema=True with no registered schema must fail closed (T3-005)."""
+    engine = ValidationEngine(strict_schema=True)
+    ctx = make_ctx()
+    req = _req("unregistered_tool", {"param": "value"})
+    with pytest.raises(ValidationError, match="no registered schema"):
+        await engine.on_request(ctx, req)
+
+
+@pytest.mark.asyncio
+async def test_regression_strict_schema_registered_empty_schema_passes() -> None:
+    """P2: strict_schema=True with registered empty schema must pass (no restrictions)."""
+    engine = ValidationEngine(strict_schema=True)
+    engine.register_tools([{"name": "my_tool", "inputSchema": {}}])
+    ctx = make_ctx()
+    req = _req("my_tool", {"anything": "goes"})
+    # Empty schema {} means no restrictions — must not raise
+    result = await engine.on_request(ctx, req)
+    assert result is ctx
+
+
+@pytest.mark.asyncio
+async def test_regression_strict_schema_registered_schema_enforced() -> None:
+    """P2: strict_schema=True with registered schema must reject invalid args."""
+    engine = ValidationEngine(strict_schema=True)
+    engine.register_tools([{
+        "name": "my_tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+            "required": ["q"],
+        },
+    }])
+    ctx = make_ctx()
+    req = _req("my_tool", {"not_q": "wrong"})
+    with pytest.raises(ValidationError):
+        await engine.on_request(ctx, req)
+
+
+@pytest.mark.asyncio
+async def test_regression_strict_schema_false_allows_unregistered_tool() -> None:
+    """P2: strict_schema=False must not raise for unregistered tools."""
+    engine = ValidationEngine(strict_schema=False)
+    ctx = make_ctx()
+    req = _req("unknown_tool", {"anything": "goes"})
+    result = await engine.on_request(ctx, req)
+    assert result is ctx

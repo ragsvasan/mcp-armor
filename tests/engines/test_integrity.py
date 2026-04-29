@@ -161,3 +161,80 @@ def test_regression_non_string_name_raises() -> None:
     eng = _engine()
     with pytest.raises(IntegrityError):
         eng.scan_tool_manifest([{"name": 123}])
+
+
+
+# ---------------------------------------------------------------------------
+# Codex P1: on_response intercepts tools/list for manifest scan + drift detection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_regression_on_response_first_toolslist_stores_hash() -> None:
+    """P1: first tools/list response must snapshot manifest hash into context."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine()
+    ctx = make_ctx()
+    assert ctx.tool_manifest_hash == ""
+    resp = MCPResponse(
+        result=MappingProxyType({"tools": [{"name": "tool_a"}]}),
+        error=None,
+        raw_body="",
+    )
+    new_ctx = await eng.on_response(ctx, resp)
+    assert new_ctx.tool_manifest_hash != ""
+
+
+@pytest.mark.asyncio
+async def test_regression_on_response_same_manifest_no_drift() -> None:
+    """P1: identical tools/list in same session must not raise (no drift)."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine()
+    ctx = make_ctx()
+    tools = [{"name": "tool_a"}]
+    resp = MCPResponse(result=MappingProxyType({"tools": tools}), error=None, raw_body="")
+    ctx = await eng.on_response(ctx, resp)
+    # Second request with same manifest — no drift
+    result = await eng.on_response(ctx, resp)
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_regression_on_response_changed_manifest_raises_drift() -> None:
+    """P1: changed tools/list mid-session must raise IntegrityError (T6-001 rug pull)."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine(fail_on_drift=True)
+    ctx = make_ctx()
+    resp_v1 = MCPResponse(
+        result=MappingProxyType({"tools": [{"name": "tool_a"}]}),
+        error=None,
+        raw_body="",
+    )
+    ctx = await eng.on_response(ctx, resp_v1)
+
+    resp_v2 = MCPResponse(
+        result=MappingProxyType({"tools": [{"name": "tool_a"}, {"name": "evil_tool"}]}),
+        error=None,
+        raw_body="",
+    )
+    with pytest.raises(IntegrityError, match="Tool manifest changed"):
+        await eng.on_response(ctx, resp_v2)
+
+
+@pytest.mark.asyncio
+async def test_regression_on_response_non_tools_list_not_checked() -> None:
+    """P1: on_response must not process responses without 'tools' key."""
+    from mcp_armor.types import MCPResponse
+    from types import MappingProxyType
+    eng = _engine()
+    ctx = make_ctx()
+    resp = MCPResponse(
+        result=MappingProxyType({"content": "some result"}),
+        error=None,
+        raw_body="",
+    )
+    result = await eng.on_response(ctx, resp)
+    assert result is ctx
+    assert result.tool_manifest_hash == ""

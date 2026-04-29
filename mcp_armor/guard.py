@@ -93,7 +93,10 @@ class CoSAIGuard:
 
         if cfg.t11 is not None:
             engines.append(SupplyChainEngine(
-                tool_allowlist=list(cfg.t11.tool_allowlist) if cfg.t11.tool_allowlist else None,
+                # Preserve explicit empty list — None means no allowlist (allow all),
+                # [] means deny all. Using `if cfg.t11.tool_allowlist` would collapse
+                # both to None and silently make empty allowlist into allow-all.
+                tool_allowlist=list(cfg.t11.tool_allowlist) if cfg.t11.tool_allowlist is not None else None,
                 require_registry_signature=cfg.t11.require_registry_signature,
                 levenshtein_threshold=cfg.t11.levenshtein_threshold,
                 registry_public_key=cfg.t11.registry_public_key,
@@ -115,6 +118,7 @@ class CoSAIGuard:
         if cfg.t4 is not None:
             engines.append(BoundaryEngine(
                 scan_call_args=cfg.t4.scan_call_args,
+                scan_responses=cfg.t4.scan_responses,
             ))
 
         if cfg.t10 is not None:
@@ -128,7 +132,7 @@ class CoSAIGuard:
         if cfg.t6 is not None:
             engines.append(IntegrityEngine(
                 fail_on_drift=cfg.t6.fail_on_drift,
-                tool_allowlist=list(cfg.t6.tool_allowlist) if cfg.t6.tool_allowlist else None,
+                tool_allowlist=list(cfg.t6.tool_allowlist) if cfg.t6.tool_allowlist is not None else None,
                 typosquat_distance=cfg.t6.typosquat_distance,
             ))
 
@@ -165,10 +169,21 @@ class CoSAIGuard:
     # -------------------------------------------------------------------------
 
     def register_tool_schemas(self, tools: list[dict]) -> None:
-        """Forward tools/list result to ValidationEngine for T3 schema validation."""
+        """
+        Register a tools/list result with all engines that need it at setup time.
+
+        Calls:
+        - ValidationEngine.register_tools()  — T3 schema enforcement
+        - SupplyChainEngine.validate_tools()  — T11 allowlist + signature check
+        - IntegrityEngine.scan_tool_manifest() — T6 typosquat + homoglyph scan
+        """
         for engine in self._engines:
             if isinstance(engine, ValidationEngine):
                 engine.register_tools(tools)
+            elif isinstance(engine, SupplyChainEngine):
+                engine.validate_tools(tools)
+            elif isinstance(engine, IntegrityEngine):
+                engine.scan_tool_manifest(tools)
 
     async def startup(self) -> None:
         for engine in self._engines:
@@ -235,18 +250,21 @@ class CoSAIGuard:
         self,
         threats: list[str] | None = None,
         pii_profile: str | None = None,
+        required_scope: str | None = None,
     ) -> Callable:
         """
         Per-tool decorator that applies a filtered engine subset around a single tool.
 
-        threats:     limit which CoSAI categories run (e.g. ["T3", "T5"]).
-                     All engines run when omitted.
-        pii_profile: override the T5 PII profile for this tool only
-                     ("minimal" | "pci" | "hipaa" | "gdpr" | "strict").
+        threats:        limit which CoSAI categories run (e.g. ["T3", "T5"]).
+                        All engines run when omitted.
+        pii_profile:    override the T5 PII profile for this tool only
+                        ("minimal" | "pci" | "hipaa" | "gdpr" | "strict").
+        required_scope: OAuth scope string that must appear in ctx.scopes for the call
+                        to proceed. Raises AuthorizationError if absent.
 
         Usage:
             @app.tool()
-            @guard.protect(threats=["T3", "T5"], pii_profile="strict")
+            @guard.protect(threats=["T3", "T5"], pii_profile="strict", required_scope="admin")
             async def patient_lookup(mrn: str) -> str: ...
         """
         # --- build the active engine list once at decoration time ---
@@ -271,6 +289,7 @@ class CoSAIGuard:
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 from types import MappingProxyType
+                from .exceptions import AuthorizationError
                 session_id = str(uuid.uuid4())
                 ctx = CoSAIContext.new(session_id, transport="stdio")
                 req = MCPRequest(
@@ -283,6 +302,12 @@ class CoSAIGuard:
                 for engine in active:
                     ctx = await engine.on_request(ctx, req)
                     set_context(ctx)
+                # Per-tool scope enforcement — checked after on_request so AuthEngine
+                # has a chance to populate ctx.scopes from request headers.
+                if required_scope is not None and required_scope not in ctx.scopes:
+                    raise AuthorizationError(
+                        f"Tool {fn.__name__!r} requires scope {required_scope!r}"
+                    )
                 result = await fn(*args, **kwargs)
                 escaped = html.escape(str(result)[:65536], quote=True)
                 resp = MCPResponse(result=None, error=None, raw_body=escaped)

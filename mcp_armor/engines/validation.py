@@ -164,9 +164,14 @@ class ValidationEngine:
         if arguments is not None:
             self._scan_all_strings(arguments, "arguments")
 
-        # T3-005: JSON schema validation
+        # T3-005: JSON schema validation — fail closed when strict_schema=True
         if self._strict_schema:
-            schema = self._tool_schemas.get(tool_name)
+            if tool_name not in self._tool_schemas:
+                raise ValidationError(
+                    f"Tool {tool_name!r} has no registered schema — "
+                    "call register_tool_schemas() before dispatching (T3-005)"
+                )
+            schema = self._tool_schemas[tool_name]
             if schema:
                 self._validate_schema(arguments or {}, schema, tool_name)
 

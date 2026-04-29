@@ -81,6 +81,14 @@ class TrustEngine:
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        # Enforce T9 in the response chain — scan for injection patterns before
+        # the response reaches the client (not just a helper callers must invoke).
+        if resp.raw_body and self._strip_injections:
+            matched = self._boundary._scan(resp.raw_body)
+            if matched:
+                raise TrustBoundaryViolation(
+                    f"Tool response contains injection pattern: {matched!r} — blocked (T9-001)"
+                )
         return ctx
 
     async def on_session_end(self, ctx: CoSAIContext) -> None:

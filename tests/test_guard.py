@@ -344,3 +344,104 @@ async def test_protect_all_threats_run_when_none_specified() -> None:
 
     await my_tool()
     assert ran == ["T4"]
+
+
+# ---------------------------------------------------------------------------
+# Codex P1: register_tool_schemas wires SupplyChain + Integrity
+# ---------------------------------------------------------------------------
+
+def test_regression_register_tool_schemas_calls_supply_chain_validate() -> None:
+    """P1: register_tool_schemas must call SupplyChainEngine.validate_tools() — T11 check."""
+    from mcp_armor.engines.supply_chain import SupplyChainEngine
+    from mcp_armor.exceptions import SupplyChainError
+
+    guard = CoSAIGuard([SupplyChainEngine(tool_allowlist=["only_allowed"])])
+    with pytest.raises(SupplyChainError, match="not on the approved allowlist"):
+        guard.register_tool_schemas([{"name": "evil_tool"}])
+
+
+def test_regression_register_tool_schemas_calls_integrity_scan() -> None:
+    """P1: register_tool_schemas must call IntegrityEngine.scan_tool_manifest() — T6 check."""
+    from mcp_armor.engines.integrity import IntegrityEngine
+    from mcp_armor.exceptions import IntegrityError
+
+    guard = CoSAIGuard([IntegrityEngine()])
+    # Duplicate tool names trigger homoglyph/shadow check
+    with pytest.raises(IntegrityError, match="shadow"):
+        guard.register_tool_schemas([{"name": "tool_a"}, {"name": "tool_a"}])
+
+
+def test_regression_register_tool_schemas_clean_manifest_passes() -> None:
+    """P1: register_tool_schemas with a clean manifest must not raise."""
+    from mcp_armor.engines.supply_chain import SupplyChainEngine
+    from mcp_armor.engines.integrity import IntegrityEngine
+    from mcp_armor.engines.validation import ValidationEngine
+
+    guard = CoSAIGuard([
+        ValidationEngine(strict_schema=False),
+        SupplyChainEngine(tool_allowlist=["get_data", "list_items"]),
+        IntegrityEngine(),
+    ])
+    # Clean manifest — must not raise
+    guard.register_tool_schemas([
+        {"name": "get_data", "inputSchema": {"type": "object"}},
+        {"name": "list_items", "inputSchema": {"type": "object"}},
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Codex P2: guard.protect() required_scope parameter
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_regression_protect_required_scope_raises_when_missing() -> None:
+    """P2: protect(required_scope=...) must raise AuthorizationError when scope absent."""
+    from mcp_armor.exceptions import AuthorizationError
+
+    guard = CoSAIGuard([])
+
+    @guard.protect(required_scope="admin")
+    async def sensitive_tool() -> str:
+        return "secret"
+
+    with pytest.raises(AuthorizationError, match="requires scope"):
+        await sensitive_tool()
+
+
+@pytest.mark.asyncio
+async def test_regression_protect_required_scope_passes_when_present() -> None:
+    """P2: protect(required_scope=...) must pass when ctx.scopes contains the required scope."""
+    from mcp_armor.engines.base import ProtectionEngine
+
+    class ScopeInjectEngine(ProtectionEngine):
+        """Simulates AuthEngine — injects a scope into the context."""
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            return ctx.with_scopes(("admin", "read"))
+
+        async def on_response(self, ctx, resp):
+            return ctx
+
+    guard = CoSAIGuard([ScopeInjectEngine()])
+
+    @guard.protect(required_scope="admin")
+    async def sensitive_tool() -> str:
+        return "secret"
+
+    result = await sensitive_tool()
+    assert result == "secret"
+
+
+@pytest.mark.asyncio
+async def test_regression_protect_no_required_scope_always_passes() -> None:
+    """P2: protect() without required_scope must behave as before."""
+    guard = CoSAIGuard([])
+
+    @guard.protect()
+    async def open_tool() -> str:
+        return "hello"
+
+    result = await open_tool()
+    assert result == "hello"

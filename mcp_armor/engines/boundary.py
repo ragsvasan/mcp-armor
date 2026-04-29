@@ -65,8 +65,9 @@ class BoundaryEngine:
     writing assistants).  Disabling must be an explicit, documented exception.
     """
 
-    def __init__(self, scan_call_args: bool = True) -> None:
+    def __init__(self, scan_call_args: bool = True, scan_responses: bool = True) -> None:
         self._scan_call_args = scan_call_args
+        self._scan_responses = scan_responses
         self._compiled = self._compile_patterns()
 
     def _compile_patterns(self) -> list[Any]:
@@ -139,6 +140,8 @@ class BoundaryEngine:
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        if not self._scan_responses:
+            return ctx
         if resp.raw_body:
             matched = self._scan(resp.raw_body)
             if matched:

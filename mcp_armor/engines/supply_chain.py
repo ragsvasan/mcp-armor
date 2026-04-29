@@ -204,6 +204,12 @@ class SupplyChainEngine:
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        # Intercept tools/list responses and run manifest validation automatically.
+        # This enforces T11 on the wrapper/middleware path without requiring app code
+        # to manually call validate_tools().
+        if resp.result is not None and "tools" in resp.result:
+            tools = list(resp.result["tools"])
+            self.validate_tools(tools)
         return ctx
 
     async def on_session_end(self, ctx: CoSAIContext) -> None:

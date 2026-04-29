@@ -468,3 +468,194 @@ async def test_regression_websocket_scope_not_forwarded_unguarded() -> None:
         await app(ws_scope, fake_receive, fake_send)
 
     assert not reached_inner
+
+
+# ---------------------------------------------------------------------------
+# Codex findings — P0/P2 regression tests
+# ---------------------------------------------------------------------------
+
+async def test_regression_response_violation_blocked_before_delivery() -> None:
+    """P0: response engine violation must replace the response with an opaque error —
+    the violating body must NOT be delivered to the client first.
+
+    The engine only rejects tools/call responses (the result has 'method': 'tools/call')
+    so the initialize round-trip completes and returns the session header normally.
+    """
+    from mcp_armor.engines.base import ProtectionEngine
+    from mcp_armor.exceptions import PIILeakError
+
+    class ResponseRejectOnToolsCall(ProtectionEngine):
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            return ctx
+
+        async def on_response(self, ctx, resp):
+            # Only reject responses that echo back a tools/call method
+            if resp.result and resp.result.get("method") == "tools/call":
+                raise PIILeakError("credit card in response")
+            return ctx
+
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), ResponseRejectOnToolsCall()])
+    app = _make_app(guard)
+
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+
+        resp = await client.post(
+            "/",
+            json=_payload("tools/call"),
+            headers={"mcp-session-id": session_id},
+        )
+
+    data = resp.json()
+    # Must get an error response, not the raw upstream body
+    assert "error" in data
+    assert data["error"]["code"] == -32004  # PIILeakError
+
+
+async def test_regression_response_violation_body_not_in_reply() -> None:
+    """P0: when response guard rejects, the upstream body must not appear in the reply."""
+    from mcp_armor.engines.base import ProtectionEngine
+    from mcp_armor.exceptions import InjectionDetectedError
+
+    secret_payload = "SENSITIVE_DATA_XYZ"
+
+    async def _leaking_handler(request: Request) -> JSONResponse:
+        body = await request.body()
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {}
+        method = payload.get("method", "")
+        if method == "tools/call":
+            return JSONResponse({"jsonrpc": "2.0", "id": 1, "result": {"data": secret_payload}})
+        return JSONResponse({"jsonrpc": "2.0", "id": payload.get("id"), "result": {}})
+
+    class RejectOnSecretData(ProtectionEngine):
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            return ctx
+
+        async def on_response(self, ctx, resp):
+            if resp.result and "data" in resp.result:
+                raise InjectionDetectedError("sensitive data in response")
+            return ctx
+
+    inner = Starlette(routes=[Route("/{path:path}", _leaking_handler, methods=["POST"])])
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), RejectOnSecretData()])
+    app = ArmorMiddleware(inner, guard)
+
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+        resp = await client.post(
+            "/",
+            json=_payload("tools/call"),
+            headers={"mcp-session-id": session_id},
+        )
+
+    assert secret_payload not in resp.text
+
+
+async def test_regression_non_dict_json_array_rejected() -> None:
+    """P2: a JSON array body must return -32600 Invalid Request, not crash on .get()."""
+    async with _client(_make_app()) as client:
+        resp = await client.post(
+            "/",
+            content=b'[{"jsonrpc":"2.0","method":"initialize"}]',
+            headers={"content-type": "application/json"},
+        )
+    data = resp.json()
+    assert data["error"]["code"] == -32600
+
+
+async def test_regression_non_dict_scalar_json_rejected() -> None:
+    """P2: a scalar JSON value (null, number, string) must return -32600."""
+    async with _client(_make_app()) as client:
+        resp = await client.post(
+            "/",
+            content=b"null",
+            headers={"content-type": "application/json"},
+        )
+    data = resp.json()
+    assert data["error"]["code"] == -32600
+
+
+async def test_regression_opaque_codes_injection_is_minus32003() -> None:
+    """P2: InjectionDetectedError (T4, code -32003) must map to 'Injection detected'."""
+    from mcp_armor.engines.base import ProtectionEngine
+    from mcp_armor.exceptions import InjectionDetectedError
+
+    class InjectOnRequest(ProtectionEngine):
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            if req.method == "tools/call":
+                raise InjectionDetectedError("test injection")
+            return ctx
+
+        async def on_response(self, ctx, resp):
+            return ctx
+
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), InjectOnRequest()])
+    app = _make_app(guard)
+
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+        resp = await client.post(
+            "/",
+            json=_payload("tools/call"),
+            headers={"mcp-session-id": session_id},
+        )
+
+    data = resp.json()
+    assert data["error"]["code"] == -32003
+    assert data["error"]["message"] == "Injection detected"
+
+
+async def test_regression_opaque_codes_pii_is_minus32004() -> None:
+    """P2: PIILeakError (T5, code -32004) must map to 'PII leak detected'."""
+    from mcp_armor.engines.base import ProtectionEngine
+    from mcp_armor.exceptions import PIILeakError
+
+    class PIIOnResponse(ProtectionEngine):
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            return ctx
+
+        async def on_response(self, ctx, resp):
+            if resp.result and resp.result.get("method") == "tools/call":
+                raise PIILeakError("ssn found")
+            return ctx
+
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), PIIOnResponse()])
+    app = _make_app(guard)
+
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+        resp = await client.post(
+            "/",
+            json=_payload("tools/call"),
+            headers={"mcp-session-id": session_id},
+        )
+
+    data = resp.json()
+    assert data["error"]["code"] == -32004
+    assert data["error"]["message"] == "PII leak detected"
+
+
+async def test_regression_opaque_codes_validation_is_minus32602() -> None:
+    """P2: ValidationError (T3, code -32602) must be in the opaque map."""
+    from mcp_armor.adapters.fastapi import _OPAQUE_MESSAGES
+    assert -32602 in _OPAQUE_MESSAGES
+    assert _OPAQUE_MESSAGES[-32602] == "Validation error"

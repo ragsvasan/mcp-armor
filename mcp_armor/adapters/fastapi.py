@@ -22,20 +22,20 @@ Send = Callable
 _SESSION_HEADER = b"mcp-session-id"
 _SESSION_HEADER_STR = "mcp-session-id"
 
-# Opaque error messages keyed by JSON-RPC code — internal detail must not reach clients
+# Opaque error messages keyed by JSON-RPC code — aligned with CoSAIException subclasses
 _OPAQUE_MESSAGES: dict[int, str] = {
-    -32001: "Authentication error",
-    -32002: "Authorization error",
-    -32003: "Validation error",
-    -32004: "Injection detected",
-    -32005: "PII leak detected",
-    -32006: "Session error",
-    -32007: "Audit chain error",
-    -32008: "Network binding error",
-    -32009: "Resource limit exceeded",
-    -32010: "Trust boundary violation",
-    -32011: "Supply chain error",
-    -32012: "Integrity error",
+    -32001: "Authentication error",         # AuthenticationError (T1)
+    -32002: "Authorization error",          # AuthorizationError (T2)
+    -32003: "Injection detected",           # InjectionDetectedError (T4)
+    -32004: "PII leak detected",            # PIILeakError (T5)
+    -32005: "Integrity error",              # IntegrityError (T6)
+    -32006: "Session error",                # SessionError (T7)
+    -32007: "Trust boundary violation",     # TrustBoundaryViolation (T9)
+    -32008: "Network binding error",        # NetworkBindingError (T8)
+    -32009: "Audit chain error",            # AuditChainError (T12)
+    -32010: "Resource limit exceeded",      # ResourceExceededError (T10)
+    -32011: "Supply chain error",           # SupplyChainError (T11)
+    -32602: "Validation error",             # ValidationError (T3, standard invalid params)
 }
 
 # Body size cap enforced during buffering — before deserialization (FIX-4)
@@ -187,13 +187,19 @@ class ArmorMiddleware:
                                   "Content-Type must be application/json")
                 return
 
-        # Parse JSON
+        # Parse JSON — reject non-dict shapes (batch arrays, scalars) before .get() calls
         try:
-            payload: dict[str, Any] = json.loads(raw_body) if raw_body else {}
+            parsed: Any = json.loads(raw_body) if raw_body else {}
         except json.JSONDecodeError:
             await _send_error(send, None, -32700, "Parse error: invalid JSON")
             return
 
+        if not isinstance(parsed, dict):
+            await _send_error(send, None, -32600,
+                              "Invalid Request: expected a JSON object")
+            return
+
+        payload: dict[str, Any] = parsed
         request_id = payload.get("id")
 
         # FIX-2: URL-decode query string keys/values to prevent percent-encoding bypass (T7-002)
@@ -246,23 +252,28 @@ class ArmorMiddleware:
             await _send_error(send, request_id, -32603, "Internal error")
             return
 
-        # Wrap send to inject Mcp-Session-Id header on initialize
+        # Buffer the entire upstream response before running the response-phase guard.
+        # Nothing is sent to the client until all response engines pass — violations
+        # replace the response with an opaque JSON-RPC error (P0 fix).
+        response_start_msg: dict | None = None
         response_body_parts: list[bytes] = []
 
-        async def wrapped_send(message: dict) -> None:
-            if message["type"] == "http.response.start" and is_new_session:
-                # Strip any upstream Mcp-Session-Id — the upstream server may generate
-                # its own session token, but clients must use armor's CSPRNG-generated
-                # session_id so the SessionEngine can verify subsequent requests (T7-001).
-                headers = [
-                    (k, v) for k, v in message.get("headers", [])
-                    if k.lower() != _SESSION_HEADER
-                ]
-                headers.append((_SESSION_HEADER, session_id.encode("ascii")))
-                message = {**message, "headers": headers}
-            if message["type"] == "http.response.body":
+        async def buffering_send(message: dict) -> None:
+            nonlocal response_start_msg
+            if message["type"] == "http.response.start":
+                if is_new_session:
+                    # Strip any upstream Mcp-Session-Id — clients must use armor's
+                    # CSPRNG-generated session_id (T7-001).
+                    headers = [
+                        (k, v) for k, v in message.get("headers", [])
+                        if k.lower() != _SESSION_HEADER
+                    ]
+                    headers.append((_SESSION_HEADER, session_id.encode("ascii")))
+                    message = {**message, "headers": headers}
+                response_start_msg = message
+            elif message["type"] == "http.response.body":
                 response_body_parts.append(message.get("body", b""))
-            await send(message)
+            # Do NOT forward to `send` here — buffer everything until guard passes.
 
         body_iter = iter([
             {"type": "http.request", "body": raw_body, "more_body": False}
@@ -274,9 +285,9 @@ class ArmorMiddleware:
             except StopIteration:
                 return {"type": "http.disconnect"}
 
-        await self._app(scope, replay_receive, wrapped_send)
+        await self._app(scope, replay_receive, buffering_send)
 
-        # Response-phase guard (finding logged; response already committed)
+        # Run response-phase guard BEFORE committing response to client.
         resp_raw = b"".join(response_body_parts)
         try:
             resp_dict = json.loads(resp_raw) if resp_raw else {}
@@ -284,11 +295,21 @@ class ArmorMiddleware:
             resp_dict = {}
         resp = MCPResponse.from_dict(resp_dict)
         try:
-            await self._guard._run_response(ctx, resp)
+            ctx = await self._guard._run_response(ctx, resp)
         except CoSAIException as exc:
             log.warning("Guard response violation [%s]: %s", exc.__class__.__name__, exc)
+            client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Response rejected")
+            await _send_error(send, request_id, exc.json_rpc_code, client_msg)
+            return
         except Exception as exc:
             log.error("Unexpected guard error on response: %s", exc, exc_info=True)
+            await _send_error(send, request_id, -32603, "Internal error")
+            return
+
+        # Guard passed — replay buffered response to client.
+        if response_start_msg is not None:
+            await send(response_start_msg)
+        await send({"type": "http.response.body", "body": resp_raw, "more_body": False})
 
 
 # ---------------------------------------------------------------------------

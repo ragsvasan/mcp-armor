@@ -291,7 +291,8 @@ def load_config(path: str | Path) -> ArmorConfig:
     t6_allowlist = None
     if t6_raw is not None:
         raw_al = t6_raw.get("tool_allowlist")
-        t6_allowlist = tuple(raw_al) if raw_al else None
+        # Distinguish key absent (None → no allowlist) from explicit [] (empty → deny all)
+        t6_allowlist = tuple(raw_al) if raw_al is not None else None
     t6 = T6Config(
         fail_on_drift=bool(t6_raw.get("fail_on_drift", True)),
         tool_allowlist=t6_allowlist,
@@ -332,7 +333,8 @@ def load_config(path: str | Path) -> ArmorConfig:
     t11: T11Config | None = None
     if t11_raw is not None:
         raw_al11 = t11_raw.get("tool_allowlist")
-        t11_allowlist = tuple(raw_al11) if raw_al11 else None
+        # Distinguish key absent (None → no allowlist) from explicit [] (empty → deny all)
+        t11_allowlist = tuple(raw_al11) if raw_al11 is not None else None
         t11 = T11Config(
             tool_allowlist=t11_allowlist,
             require_registry_signature=bool(t11_raw.get("require_registry_signature", False)),

@@ -125,3 +125,115 @@ async def test_on_response_passthrough() -> None:
 async def test_on_startup_passthrough() -> None:
     eng = _engine()
     await eng.on_startup()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Codex P1: on_startup validates bind_host when configured
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_regression_on_startup_rejects_wildcard_bind_host() -> None:
+    """P1: on_startup must raise NetworkBindingError when bind_host='0.0.0.0'."""
+    eng = NetworkEngine(allow_public_bind=False, block_rfc1918_ssrf=True,
+                        bind_host="0.0.0.0", bind_port=8080)
+    with pytest.raises(NetworkBindingError, match="0.0.0.0"):
+        await eng.on_startup()
+
+
+@pytest.mark.asyncio
+async def test_regression_on_startup_allows_localhost_bind_host() -> None:
+    """P1: on_startup must not raise when bind_host='127.0.0.1'."""
+    eng = NetworkEngine(allow_public_bind=False, block_rfc1918_ssrf=True,
+                        bind_host="127.0.0.1", bind_port=8080)
+    await eng.on_startup()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_regression_on_startup_no_bind_host_always_passes() -> None:
+    """P1: on_startup with no bind_host must not raise regardless of allow_public_bind."""
+    eng = NetworkEngine(allow_public_bind=False, block_rfc1918_ssrf=True)
+    await eng.on_startup()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Codex P1: on_request scans tools/call args for SSRF (T8-002)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_regression_on_request_blocks_ssrf_url_in_args() -> None:
+    """P1: on_request must reject tools/call with SSRF-target URL in arguments."""
+    eng = _engine()
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "fetch", "arguments": {"url": "http://127.0.0.1/admin"}},
+    )
+    with patch("mcp_armor.engines.network.socket.gethostbyname", return_value="127.0.0.1"):
+        with pytest.raises(NetworkBindingError, match="SSRF target"):
+            await eng.on_request(ctx, req)
+
+
+@pytest.mark.asyncio
+async def test_regression_on_request_blocks_metadata_service_url() -> None:
+    """P1: on_request must block AWS metadata service address."""
+    eng = _engine()
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "fetch", "arguments": {"url": "http://169.254.169.254/latest/meta-data/"}},
+    )
+    with patch("mcp_armor.engines.network.socket.gethostbyname", return_value="169.254.169.254"):
+        with pytest.raises(NetworkBindingError, match="SSRF target"):
+            await eng.on_request(ctx, req)
+
+
+@pytest.mark.asyncio
+async def test_regression_on_request_allows_public_url() -> None:
+    """P1: on_request must allow URLs pointing to public IPs."""
+    eng = _engine()
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "fetch", "arguments": {"url": "https://api.example.com/data"}},
+    )
+    with patch("mcp_armor.engines.network.socket.gethostbyname", return_value="93.184.216.34"):
+        result = await eng.on_request(ctx, req)
+    assert result is ctx
+
+
+@pytest.mark.asyncio
+async def test_regression_on_request_blocks_ssrf_in_nested_arg() -> None:
+    """P1: SSRF scanning must recurse into nested argument structures."""
+    eng = _engine()
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "fetch", "arguments": {"config": {"endpoint": "http://10.0.0.1/secret"}}},
+    )
+    with patch("mcp_armor.engines.network.socket.gethostbyname", return_value="10.0.0.1"):
+        with pytest.raises(NetworkBindingError, match="SSRF target"):
+            await eng.on_request(ctx, req)
+
+
+@pytest.mark.asyncio
+async def test_regression_on_request_non_tools_call_not_scanned() -> None:
+    """P1: on_request must not SSRF-scan non-tools/call methods."""
+    eng = _engine()
+    ctx = make_ctx()
+    req = make_request(method="tools/list", params={})
+    result = await eng.on_request(ctx, req)
+    assert result is ctx
+
+
+@pytest.mark.asyncio
+async def test_regression_on_request_ssrf_disabled_skips_scan() -> None:
+    """P1: on_request with block_rfc1918_ssrf=False must not block any URL."""
+    eng = NetworkEngine(allow_public_bind=False, block_rfc1918_ssrf=False)
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "fetch", "arguments": {"url": "http://127.0.0.1/admin"}},
+    )
+    with patch("mcp_armor.engines.network.socket.gethostbyname", return_value="127.0.0.1"):
+        result = await eng.on_request(ctx, req)
+    assert result is ctx

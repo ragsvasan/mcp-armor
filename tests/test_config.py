@@ -147,8 +147,8 @@ def test_load_t11_empty_allowlist(tmp_path: Path) -> None:
     """)
     cfg = load_config(p)
     assert cfg.t11 is not None
-    # Empty list normalises to None (deny all is handled by SupplyChainEngine)
-    assert cfg.t11.tool_allowlist is None
+    # P1 fix: empty list must preserve as () (deny all), not collapse to None (allow all)
+    assert cfg.t11.tool_allowlist == ()
 
 
 def test_load_all_threats(tmp_path: Path) -> None:
@@ -238,3 +238,49 @@ def test_context_with_scopes() -> None:
     ctx2 = ctx.with_scopes(("read:public", "write:own"))
     assert ctx2.scopes == ("read:public", "write:own")
     assert ctx.scopes == ()  # original unchanged
+
+
+# ---------------------------------------------------------------------------
+# Codex P1: empty tool_allowlist preserved (not collapsed to None)
+# ---------------------------------------------------------------------------
+
+def test_regression_empty_t11_allowlist_preserved_not_allow_all(tmp_path: Path) -> None:
+    """P1: tool_allowlist: [] must produce an empty tuple (deny all), not None (allow all)."""
+    p = _write(tmp_path, """
+        version: 1
+        threats:
+          T11:
+            enabled: true
+            tool_allowlist: []
+    """)
+    cfg = load_config(p)
+    assert cfg.t11 is not None
+    # Must be an empty tuple, not None — empty allowlist means deny all tools
+    assert cfg.t11.tool_allowlist == ()
+
+
+def test_regression_absent_t11_allowlist_is_none(tmp_path: Path) -> None:
+    """P1: absent tool_allowlist key must remain None (no allowlist = allow all)."""
+    p = _write(tmp_path, """
+        version: 1
+        threats:
+          T11:
+            enabled: true
+    """)
+    cfg = load_config(p)
+    assert cfg.t11 is not None
+    assert cfg.t11.tool_allowlist is None
+
+
+def test_regression_empty_t6_allowlist_preserved_not_allow_all(tmp_path: Path) -> None:
+    """P1: T6 tool_allowlist: [] must produce empty tuple (deny all), not None."""
+    p = _write(tmp_path, """
+        version: 1
+        threats:
+          T6:
+            enabled: true
+            tool_allowlist: []
+    """)
+    cfg = load_config(p)
+    assert cfg.t6 is not None
+    assert cfg.t6.tool_allowlist == ()

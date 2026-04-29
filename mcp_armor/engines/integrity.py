@@ -144,6 +144,16 @@ class IntegrityEngine:
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        # Intercept tools/list responses to enforce manifest integrity automatically.
+        # First tools/list: snapshot + scan. Subsequent ones: drift check (T6-001).
+        if resp.result is not None and "tools" in resp.result:
+            tools = list(resp.result["tools"])
+            new_hash = self._manifest_hash(tools)
+            if not ctx.tool_manifest_hash:
+                self.scan_tool_manifest(tools)
+                return ctx.with_manifest_hash(new_hash)
+            else:
+                self.check_drift(ctx, tools)
         return ctx
 
     def scan_tool_manifest(self, tools: list[dict]) -> list[Finding]:
