@@ -4,8 +4,8 @@
 
 mcp-armor is the server-side complement to the cosai-mcp scanner. Every contribution should move one of these metrics:
 
-1. **Coverage** — more of the 40 CoSAI sub-threats implemented (not stubbed)
-2. **Correctness** — existing engines made more accurate (fewer false positives/negatives)
+1. **Correctness** — existing engines made more accurate (fewer false positives/negatives)
+2. **Coverage** — new sub-threats within the 12 CoSAI categories
 3. **Adoption** — lower friction for server authors to integrate
 
 ## Development Setup
@@ -38,16 +38,6 @@ Required: Python 3.11+, `google-re2` (for production-faithful regex behaviour).
 3. Update `docs/COVERAGE.md` — move the sub-threat from "Not implemented" to "Done"
 4. Add a test in `tests/engines/test_auth.py` named `test_t1_003_*`
 5. If the sub-threat requires a new pattern, add it to the relevant patterns list in the engine file — not in `boundary.py` (which is T4-specific)
-
-## Implementing a Stub Engine
-
-Several engines are currently stubs (`SessionEngine`, full `ValidationEngine`, etc.). To implement:
-
-1. Read the relevant section in `docs/THREAT_MAPPING.md` to understand the threat
-2. Read the corresponding section in `docs/COVERAGE.md` to see what sub-threats need covering
-3. Implement the lifecycle hook(s) that apply to this engine's layer
-4. Ensure `on_startup()` raises `CoSAIException` for misconfiguration (startup-only engines T8, T11) or `pass` (all others)
-5. Run the panel gate: T1 for auth/session/authz engines, T2 for all others
 
 ## Panel Gates (from global CLAUDE.md)
 

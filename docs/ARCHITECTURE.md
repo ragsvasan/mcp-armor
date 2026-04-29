@@ -168,8 +168,8 @@ Adapters translate between the framework's request/response objects and `MCPRequ
 
 ```
 mcp_armor/adapters/
-  fastmcp.py      wrap_fastmcp(app, guard) → FastMCP app
-  fastapi.py      ArmorMiddleware(app, guard) → ASGI app
+  fastmcp.py      wrap_fastmcp(app, guard) → protected FastMCP app
+  fastapi.py      ArmorMiddleware(app, guard) → ASGI middleware
   dispatcher.py   wrap_dispatcher(fn, guard) → async callable
 ```
 
@@ -177,7 +177,9 @@ mcp_armor/adapters/
 
 **wrap_dispatcher:** the lowest-level integration. Wraps any `async (dict) -> dict` function. Useful for custom transports, stdio servers, and testing.
 
-**wrap_fastmcp:** deferred pending a stable FastMCP middleware API. Currently raises `NotImplementedError` — use `guard.asgi(app)` or `guard.wrap_dispatcher()` instead.
+**wrap_fastmcp:** wraps a `fastmcp.FastMCP` instance. Validates the type at call time,
+hooks into tool dispatch via `_GuardedToolDispatcher`, and guarantees `close_session` fires
+in a `finally` block even when the tool raises.
 
 ---
 

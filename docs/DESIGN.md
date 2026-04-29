@@ -1,9 +1,9 @@
 # CoSAI Server-Side SDK — Design Document
 
-**Date:** 2026-04-27  
-**Status:** Proposal — pre-implementation  
-**Context:** This document captures the design discussion for a server-side protection library
-that any MCP server author can import to address all 12 CoSAI threat categories.
+**Date:** 2026-04-28  
+**Status:** Implemented — v0.1.0  
+**Context:** This document captures the design rationale for mcp-armor, a server-side
+protection library covering all 12 CoSAI threat categories.
 
 ---
 
@@ -312,20 +312,7 @@ the framework's request/response model and `MCPRequest`/`MCPResponse`.
 
 ---
 
-## Gap Analysis: What Needs to Be Built
+## Implementation Status
 
-The existing scanner middleware files have the correct internals. The server SDK needs:
-
-| Gap | What's needed |
-|---|---|
-| `CoSAIGuard` composition class | Assembles engine chain, drives hooks |
-| `CoSAIContext` ContextVar | Async-safe shared per-request state |
-| `ProtectionEngine` protocol | Standard interface all engines implement |
-| `validation.py` (stub) | T3 JSON schema strict mode + injection guards |
-| `authz.py` (stub) | T2 per-tool RBAC, caller identity check |
-| `session.py` (stub) | T7 cryptographic session binding |
-| `supply_chain.py` (stub) | T11 tool allowlist + registry signature check |
-| Config loader | `cosai.yaml` → typed frozen policy objects |
-| Framework adapters | FastMCP, FastAPI/ASGI, raw JSON-RPC dispatcher |
-| Exception hierarchy | `CoSAIException` base + 12 typed subclasses |
-| Coverage matrix (README) | Maps each T category to the engine that covers it |
+All components described in this document are implemented in v0.1.0. See
+[COVERAGE.md](COVERAGE.md) for the full sub-threat coverage matrix and test references.

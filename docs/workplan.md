@@ -1,7 +1,11 @@
 # mcp-armor — Implementation Workplan
 
-**Date:** 2026-04-27  
-**Status:** P0 + P1 complete (115 tests passing). P2 is next.
+> **Archived — 2026-04-28.** All phases P0–P10 are complete in v0.1.0.
+> This document is retained as historical context. For current state see
+> [PROJECT_CONTEXT.md](../PROJECT_CONTEXT.md) and [docs/COVERAGE.md](COVERAGE.md).
+
+**Original date:** 2026-04-27  
+**Status at archive:** All phases complete — 336 tests, 90%+ coverage.
 
 ---
 
