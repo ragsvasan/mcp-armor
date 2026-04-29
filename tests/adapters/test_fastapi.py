@@ -280,6 +280,51 @@ async def test_regression_close_session_called_on_shutdown() -> None:
     assert session_id in ended
 
 
+async def test_regression_lifespan_forwarded_to_wrapped_app() -> None:
+    """ArmorMiddleware must forward lifespan.startup/shutdown to the wrapped app.
+
+    Regression for the bug where _handle_lifespan only called guard.startup() but
+    never propagated lifespan events to self._app — so any wrapped ASGI app that
+    initialises resources in its lifespan (e.g. an httpx client pool) was broken.
+    """
+    lifecycle: list[str] = []
+
+    class _LifecycleTrackingApp:
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "lifespan":
+                return
+            while True:
+                msg = await receive()
+                if msg["type"] == "lifespan.startup":
+                    lifecycle.append("startup")
+                    await send({"type": "lifespan.startup.complete"})
+                elif msg["type"] == "lifespan.shutdown":
+                    lifecycle.append("shutdown")
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+
+    guard = CoSAIGuard([])
+    app = ArmorMiddleware(_LifecycleTrackingApp(), guard)
+
+    scope = {"type": "lifespan"}
+    messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+
+    async def receive():
+        return next(messages)
+
+    sent = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    await app(scope, receive, send)
+    assert lifecycle == ["startup", "shutdown"], (
+        "ArmorMiddleware must forward lifespan events to the wrapped app"
+    )
+    assert any(m["type"] == "lifespan.startup.complete" for m in sent)
+    assert any(m["type"] == "lifespan.shutdown.complete" for m in sent)
+
+
 async def test_regression_session_id_url_encoded_key_rejected() -> None:
     """FIX-2: percent-encoded 'session%5fid' must still be detected as session_id in URL."""
     async with _client(_make_app()) as client:

@@ -133,3 +133,63 @@ async def test_on_session_start_passthrough() -> None:
     ctx = make_ctx()
     result = await eng.on_session_start(ctx)
     assert result is ctx
+
+
+# ---------------------------------------------------------------------------
+# T10-003: JSON argument depth bomb (regression)
+# ---------------------------------------------------------------------------
+
+async def test_deeply_nested_args_rejected() -> None:
+    """ResourceEngine must reject tool call arguments with excessive nesting depth (T10-003).
+
+    Regression: JSON depth bombs were not checked — a 50-level nested dict would
+    pass through to the upstream server and could cause stack overflow or memory issues.
+    """
+    # Build a 25-level nested dict — exceeds default max_arg_depth=20
+    nested: dict = {}
+    current = nested
+    for _ in range(25):
+        child: dict = {}
+        current["a"] = child
+        current = child
+
+    eng = _engine(max_arg_depth=20)
+    ctx = make_ctx()
+    req = make_request(method="tools/call", params={"name": "my_tool", "arguments": nested})
+    with pytest.raises(ResourceExceededError, match="depth"):
+        await eng.on_request(ctx, req)
+
+
+async def test_args_at_depth_limit_passes() -> None:
+    """Arguments at exactly max_arg_depth must be accepted."""
+    # Build a 20-level nested dict — exactly at the limit
+    nested: dict = {}
+    current = nested
+    for _ in range(20):
+        child: dict = {}
+        current["a"] = child
+        current = child
+
+    eng = _engine(max_arg_depth=20)
+    ctx = make_ctx()
+    req = make_request(method="tools/call", params={"name": "my_tool", "arguments": nested})
+    result = await eng.on_request(ctx, req)
+    assert result is not None
+
+
+async def test_flat_args_pass_depth_check() -> None:
+    """Flat argument dict must always pass depth check."""
+    eng = _engine(max_arg_depth=5)
+    ctx = make_ctx()
+    req = make_request(method="tools/call", params={"name": "my_tool", "arguments": {"type": "run", "duration_minutes": 45}})
+    result = await eng.on_request(ctx, req)
+    assert result is not None
+
+
+async def test_no_args_passes_depth_check() -> None:
+    """Missing arguments key must not raise."""
+    eng = _engine(max_arg_depth=5)
+    ctx = make_ctx()
+    req = make_request(method="tools/call", params={"name": "my_tool"})
+    result = await eng.on_request(ctx, req)
+    assert result is not None

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -100,9 +101,31 @@ class ArmorMiddleware:
     # -------------------------------------------------------------------------
 
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Forward lifespan events to the wrapped app via queues so it can initialise
+        # its own resources (e.g. httpx connection pool) before we report startup.
+        app_receive_q: asyncio.Queue[dict] = asyncio.Queue()
+        app_send_q: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def _app_receive() -> dict:
+            return await app_receive_q.get()
+
+        async def _app_send(message: dict) -> None:
+            await app_send_q.put(message)
+
+        app_task = asyncio.get_event_loop().create_task(
+            self._app(scope, _app_receive, _app_send)
+        )
+
         while True:
             message = await receive()
             if message["type"] == "lifespan.startup":
+                # Let the wrapped app start first.
+                await app_receive_q.put(message)
+                app_msg = await app_send_q.get()
+                if app_msg.get("type") == "lifespan.startup.failed":
+                    await send(app_msg)
+                    return
+                # Then initialise the guard.
                 try:
                     await self._guard.startup()
                     await send({"type": "lifespan.startup.complete"})
@@ -118,7 +141,11 @@ class ArmorMiddleware:
                         log.error("Error closing session %s on shutdown: %s", session_id, exc)
                 self._active_sessions.clear()
                 await self._guard.shutdown()
+                # Propagate shutdown to the wrapped app.
+                await app_receive_q.put(message)
+                await app_send_q.get()  # lifespan.shutdown.complete from wrapped app
                 await send({"type": "lifespan.shutdown.complete"})
+                await app_task
                 return
 
     # -------------------------------------------------------------------------

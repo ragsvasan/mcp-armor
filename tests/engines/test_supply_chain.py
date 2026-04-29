@@ -239,3 +239,68 @@ def test_regression_bad_hex_sig_raises_supply_chain_error() -> None:
     )
     with pytest.raises(SupplyChainError):
         eng.validate_tools([{"name": "my_tool", "_sig": "not-valid-hex!"}])
+
+
+# ---------------------------------------------------------------------------
+# T11-001: on_request allowlist enforcement (regression — was a no-op)
+# ---------------------------------------------------------------------------
+
+async def test_on_request_blocks_unlisted_tool_call() -> None:
+    """on_request must reject tools/call for names not on the allowlist (T11-001).
+
+    Regression: on_request() was a no-op — attackers could call any tool name
+    and bypass the allowlist, which was only checked at startup against the manifest.
+    """
+    eng = _engine(allowlist=["get_user_context", "log_workout"])
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "__cosai_probe_unlisted_tool__", "arguments": {}},
+    )
+    with pytest.raises(SupplyChainError, match="not on the approved allowlist"):
+        await eng.on_request(ctx, req)
+
+
+async def test_on_request_blocks_path_traversal_tool_name() -> None:
+    """on_request must reject path-traversal tool names (T11-001)."""
+    eng = _engine(allowlist=["get_user_context"])
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "../../etc/passwd", "arguments": {}},
+    )
+    with pytest.raises(SupplyChainError):
+        await eng.on_request(ctx, req)
+
+
+async def test_on_request_passes_allowlisted_tool() -> None:
+    """on_request must pass tools/call for tools on the allowlist."""
+    eng = _engine(allowlist=["get_user_context", "log_workout"])
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "get_user_context", "arguments": {}},
+    )
+    result = await eng.on_request(ctx, req)
+    assert result is not None
+
+
+async def test_on_request_no_allowlist_passes_any_tool() -> None:
+    """on_request with no allowlist configured must pass any tool name."""
+    eng = _engine(allowlist=None)
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "anything_goes", "arguments": {}},
+    )
+    result = await eng.on_request(ctx, req)
+    assert result is not None
+
+
+async def test_on_request_non_tools_call_not_checked() -> None:
+    """on_request must not check tool name for non tools/call methods."""
+    eng = _engine(allowlist=["get_user_context"])
+    ctx = make_ctx()
+    req = make_request(method="tools/list", params={})
+    result = await eng.on_request(ctx, req)
+    assert result is not None

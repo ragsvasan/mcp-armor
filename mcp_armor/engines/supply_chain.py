@@ -196,6 +196,11 @@ class SupplyChainEngine:
         return ctx
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
+        if req.method == "tools/call":
+            name = req.params.get("name", "")
+            if isinstance(name, str) and name:
+                self._check_typosquat(name)
+                self._check_allowlist(name)
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
