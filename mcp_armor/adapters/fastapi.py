@@ -251,7 +251,13 @@ class ArmorMiddleware:
 
         async def wrapped_send(message: dict) -> None:
             if message["type"] == "http.response.start" and is_new_session:
-                headers = list(message.get("headers", []))
+                # Strip any upstream Mcp-Session-Id — the upstream server may generate
+                # its own session token, but clients must use armor's CSPRNG-generated
+                # session_id so the SessionEngine can verify subsequent requests (T7-001).
+                headers = [
+                    (k, v) for k, v in message.get("headers", [])
+                    if k.lower() != _SESSION_HEADER
+                ]
                 headers.append((_SESSION_HEADER, session_id.encode("ascii")))
                 message = {**message, "headers": headers}
             if message["type"] == "http.response.body":

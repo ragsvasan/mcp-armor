@@ -413,6 +413,42 @@ async def test_regression_unexpected_engine_exception_returns_json_rpc_error() -
     assert "disk" not in data["error"]["message"]
 
 
+async def test_regression_upstream_session_header_stripped() -> None:
+    """ArmorMiddleware must strip upstream Mcp-Session-Id before injecting its own.
+
+    Regression: when the upstream app also returns an Mcp-Session-Id header, clients
+    received two values and used the upstream one, which armor's SessionEngine didn't
+    know about — causing all subsequent requests to fail with -32006 Session error.
+    """
+    from starlette.responses import Response as StarletteResponse
+
+    async def upstream_with_session_header(request: Request) -> StarletteResponse:
+        body = await request.body()
+        payload = json.loads(body)
+        resp = StarletteResponse(
+            content=json.dumps({"jsonrpc": "2.0", "id": payload.get("id"), "result": {}}),
+            media_type="application/json",
+        )
+        # Simulate upstream injecting its own session token
+        resp.headers["mcp-session-id"] = "upstream-generated-session-jwt-abc123"
+        return resp
+
+    inner = Starlette(routes=[Route("/{path:path}", upstream_with_session_header, methods=["POST"])])
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    app = ArmorMiddleware(inner, guard)
+
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+
+    # Response must have exactly one Mcp-Session-Id — armor's CSPRNG UUID, not upstream's JWT
+    session_ids = init_resp.headers.get_list("mcp-session-id")
+    assert len(session_ids) == 1
+    assert session_ids[0] != "upstream-generated-session-jwt-abc123"
+    # Must be a valid UUID (armor-generated)
+    import uuid as _uuid
+    _uuid.UUID(session_ids[0])
+
+
 async def test_regression_websocket_scope_not_forwarded_unguarded() -> None:
     """FIX-7: WebSocket scope must not silently bypass the guard."""
     inner = Starlette(routes=[Route("/", _echo_handler, methods=["POST"])])
