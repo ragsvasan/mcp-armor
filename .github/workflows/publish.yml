@@ -1,0 +1,96 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+  id-token: write  # Required for PyPI trusted publisher (OIDC)
+  attestations: write  # Required for Sigstore attestation
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install build tools
+        run: pip install build hatchling
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  test-before-publish:
+    name: Smoke-test the built wheel
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install built wheel
+        run: pip install dist/*.whl "pytest>=8.0" "pytest-asyncio>=0.23" "httpx>=0.27" "starlette>=0.36"
+
+      - name: Smoke test
+        run: |
+          python -c "from mcp_armor import CoSAIGuard; g = CoSAIGuard([]); print('import OK')"
+          pytest tests/ -x -q --ignore=tests/adapters/test_fastmcp.py
+
+  attest:
+    name: Generate Sigstore attestation
+    needs: test-before-publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attest distribution (Sigstore)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: attest
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI (trusted publisher / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No API token needed — PyPI trusted publisher via GitHub OIDC
+          attestations: true

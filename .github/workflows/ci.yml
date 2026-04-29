@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev,fastapi]"
+
+      - name: Lint (ruff)
+        run: ruff check mcp_armor tests
+
+      - name: Type check (mypy)
+        run: mypy mcp_armor --ignore-missing-imports --no-error-summary
+
+      - name: Test with coverage
+        run: |
+          pytest --tb=short -q \
+            --cov=mcp_armor \
+            --cov-report=term-missing \
+            --cov-fail-under=88
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: false
