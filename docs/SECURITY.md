@@ -5,7 +5,7 @@
 **Do not file public GitHub issues for security vulnerabilities.**
 
 Report vulnerabilities via GitHub's private security advisory feature:  
-`https://github.com/cosai-oasis/mcp-armor/security/advisories/new`
+`https://github.com/ragsvasan/mcp-armor/security/advisories/new`
 
 Include:
 - Description of the vulnerability
@@ -59,11 +59,7 @@ The following are known limitations, not vulnerabilities. They are documented he
 
 2. **ProtectionEngine blocks, does not redact:** When PII is detected in a tool response, the response is blocked entirely. It is not scrubbed/redacted and forwarded. This is a conservative choice — some deployments may need redaction instead of blocking.
 
-3. **SessionEngine is a stub:** T7 (session fixation, cross-transport replay) is not yet implemented. Do not rely on mcp-armor for T7 protection until Phase 4c.
-
-4. **AuthEngine validates header presence only:** JWT signature, JTI replay, and DPoP are not yet implemented. Do not rely on mcp-armor for full T1 protection until Phase 1b.
-
-5. **RE2 fallback:** If `google-re2` is not installed, mcp-armor falls back to stdlib `re`. A crafted input could cause catastrophic backtracking against the 18 injection patterns. Install `google-re2` in production.
+3. **RE2 fallback:** If `google-re2` is not installed, mcp-armor falls back to stdlib `re`. A crafted input could cause catastrophic backtracking against the injection patterns. Install `google-re2` in production.
 
 ---
 

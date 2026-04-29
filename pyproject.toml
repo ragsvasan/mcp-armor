@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/cosai-oasis/mcp-armor"
-Documentation = "https://github.com/cosai-oasis/mcp-armor/blob/main/docs/SERVER_SDK_DESIGN.md"
-Issues = "https://github.com/cosai-oasis/mcp-armor/issues"
+Homepage = "https://github.com/ragsvasan/mcp-armor"
+Documentation = "https://github.com/ragsvasan/mcp-armor/blob/main/docs/GETTING_STARTED.md"
+Issues = "https://github.com/ragsvasan/mcp-armor/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["mcp_armor"]

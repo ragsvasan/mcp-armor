@@ -37,35 +37,43 @@ pip install mcp-armor[fastmcp]
 
 ## Quick Start
 
-**Zero-config (sensible defaults):**
+**FastMCP:**
 ```python
+from fastmcp import FastMCP
 from mcp_armor import CoSAIGuard
+from mcp_armor.adapters.fastmcp import wrap_fastmcp
 
-guard = CoSAIGuard.default()
-app = guard.wrap(your_fastmcp_or_asgi_app)
-```
-
-**From config file:**
-```python
+app = FastMCP("my-server")
 guard = CoSAIGuard.from_config("cosai.yaml")
-app = guard.wrap(app)
+protected = wrap_fastmcp(app, guard)
+
+@app.tool()
+async def echo(message: str) -> str:
+    return f"Echo: {message}"
 ```
 
-**Per-tool decorator:**
+**FastAPI / ASGI:**
 ```python
-@app.tool()
-@guard.protect(threats=["T3", "T5"], pii_profile="strict")
-async def query_db(sql: str) -> str:
-    ...
+from fastapi import FastAPI
+from mcp_armor import CoSAIGuard
+from mcp_armor.adapters.fastapi import ArmorMiddleware
+
+inner = FastAPI()
+guard = CoSAIGuard.from_config("cosai.yaml")
+app = ArmorMiddleware(inner, guard)
 ```
 
 **Raw JSON-RPC dispatcher:**
 ```python
-protected = guard.wrap_dispatcher(my_dispatcher)
+from mcp_armor import CoSAIGuard
+from mcp_armor.adapters.dispatcher import wrap_dispatcher
+
+guard = CoSAIGuard.from_config("cosai.yaml")
+protected = wrap_dispatcher(my_dispatcher, guard)
 response = await protected({"method": "tools/call", "params": {...}})
 ```
 
-See [cosai.yaml.example](cosai.yaml.example) for the full configuration reference.
+See [cosai.yaml.example](cosai.yaml.example) for the full configuration reference and [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for a step-by-step guide.
 
 ## Design
 

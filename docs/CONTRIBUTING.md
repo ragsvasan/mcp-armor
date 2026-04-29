@@ -11,7 +11,7 @@ mcp-armor is the server-side complement to the cosai-mcp scanner. Every contribu
 ## Development Setup
 
 ```bash
-git clone https://github.com/cosai-oasis/mcp-armor
+git clone https://github.com/ragsvasan/mcp-armor
 cd mcp-armor
 pip install -e ".[dev]"
 pytest
