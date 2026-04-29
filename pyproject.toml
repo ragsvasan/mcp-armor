@@ -51,7 +51,9 @@ packages = ["mcp_armor"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+addopts = "--tb=short"
 
 [tool.ruff]
 line-length = 100
