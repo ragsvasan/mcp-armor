@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import functools
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
-
+from .config import ArmorConfig, load_config
 from .context import CoSAIContext, set_context
 from .engines.audit import AuditEngine
 from .engines.auth import AuthEngine
@@ -22,7 +22,10 @@ from .engines.session import SessionEngine
 from .engines.supply_chain import SupplyChainEngine
 from .engines.trust import TrustEngine
 from .engines.validation import ValidationEngine
+from .exceptions import CoSAIException, to_jsonrpc_error
 from .types import MCPRequest, MCPResponse
+
+log = logging.getLogger(__name__)
 
 
 class CoSAIGuard:
@@ -41,98 +44,97 @@ class CoSAIGuard:
         self._engines = engines
 
     # -------------------------------------------------------------------------
-    # Factory
+    # Factory — typed config
     # -------------------------------------------------------------------------
 
     @classmethod
     def from_config(cls, path: str | Path = "cosai.yaml") -> "CoSAIGuard":
         """Build a fully configured guard from a cosai.yaml file."""
-        with open(path) as f:
-            cfg = yaml.safe_load(f)
+        cfg: ArmorConfig = load_config(path)
+        return cls._from_armor_config(cfg)
 
-        t = cfg.get("threats", {})
-
-        def enabled(key: str) -> bool:
-            return t.get(key, {}).get("enabled", True)
-
+    @classmethod
+    def _from_armor_config(cls, cfg: ArmorConfig) -> "CoSAIGuard":
+        """Build from a typed ArmorConfig (also callable directly from tests)."""
         engines: list[ProtectionEngine] = []
 
         # T12 wraps everything — must be first in request chain, last in response chain
-        if enabled("T12"):
-            audit_cfg = t.get("T12", {})
+        if cfg.t12 is not None:
             engines.append(AuditEngine(
-                path=audit_cfg.get("path", "/var/log/mcp-armor/audit.jsonl"),
-                verify_on_startup=audit_cfg.get("chain_verify_on_startup", True),
+                path=cfg.t12.path,
+                verify_on_startup=cfg.t12.chain_verify_on_startup,
             ))
 
-        if enabled("T1"):
-            t1 = t.get("T1", {})
+        if cfg.t1 is not None:
             engines.append(AuthEngine(
-                require_dpop=t1.get("require_dpop", True),
-                jti_cache_size=t1.get("jti_cache_size", 10_000),
-                token_expiry_max_secs=t1.get("token_expiry_max_secs", 3600),
+                require_dpop=cfg.t1.require_dpop,
+                jti_cache_size=cfg.t1.jti_cache_size,
+                token_expiry_max_secs=cfg.t1.token_expiry_max_secs,
+                jwks=cfg.t1.jwks,
+                issuer=cfg.t1.issuer,
+                audience=cfg.t1.audience,
+                endpoint_uri=cfg.t1.endpoint_uri,
+                dpop_max_age_secs=cfg.t1.dpop_max_age_secs,
+                dpop_future_skew_secs=cfg.t1.dpop_future_skew_secs,
             ))
 
-        if enabled("T7"):
-            t7 = t.get("T7", {})
-            engines.append(SessionEngine(bind_to_dpop=t7.get("bind_session_to_dpop", True)))
+        if cfg.t7 is not None:
+            engines.append(SessionEngine(bind_to_dpop=cfg.t7.bind_to_dpop))
 
-        if enabled("T8"):
-            t8 = t.get("T8", {})
+        if cfg.t8 is not None:
             engines.append(NetworkEngine(
-                allow_public_bind=t8.get("allow_public_bind", False),
-                block_rfc1918_ssrf=t8.get("block_rfc1918", True),
+                allow_public_bind=cfg.t8.allow_public_bind,
+                block_rfc1918_ssrf=cfg.t8.block_rfc1918_ssrf,
             ))
 
-        if enabled("T11"):
-            t11 = t.get("T11", {})
+        if cfg.t11 is not None:
             engines.append(SupplyChainEngine(
-                tool_allowlist=t11.get("tool_allowlist") or None,
-                require_registry_signature=t11.get("require_registry_signature", False),
+                tool_allowlist=list(cfg.t11.tool_allowlist) if cfg.t11.tool_allowlist else None,
+                require_registry_signature=cfg.t11.require_registry_signature,
+                levenshtein_threshold=cfg.t11.levenshtein_threshold,
+                registry_public_key=cfg.t11.registry_public_key,
             ))
 
-        if enabled("T2"):
-            t2 = t.get("T2", {})
+        if cfg.t2 is not None:
             engines.append(AuthzEngine(
-                tool_policies=t2.get("tool_policies"),
-                default_deny=t2.get("default_policy", "deny") == "deny",
+                tool_policies=cfg.t2.tool_policies,
+                default_deny=cfg.t2.default_deny,
+                destructive_token_ttl_seconds=cfg.t2.destructive_token_ttl_seconds,
             ))
 
-        if enabled("T3"):
-            t3 = t.get("T3", {})
+        if cfg.t3 is not None:
             engines.append(ValidationEngine(
-                max_payload_bytes=t3.get("max_payload_bytes", 65_536),
-                strict_schema=t3.get("strict_schema", True),
+                max_payload_bytes=cfg.t3.max_payload_bytes,
+                strict_schema=cfg.t3.strict_schema,
             ))
 
-        if enabled("T4"):
-            engines.append(BoundaryEngine())
+        if cfg.t4 is not None:
+            engines.append(BoundaryEngine(
+                scan_call_args=cfg.t4.scan_call_args,
+            ))
 
-        if enabled("T10"):
-            t10 = t.get("T10", {})
+        if cfg.t10 is not None:
             engines.append(ResourceEngine(
-                max_calls_per_session=t10.get("max_calls_per_session", 100),
-                max_wall_clock_secs=t10.get("max_wall_clock_secs", 300),
-                loop_depth_limit=t10.get("loop_depth_limit", 10),
-                heartbeat_interval_secs=t10.get("heartbeat_interval_secs", 30),
+                max_calls_per_session=cfg.t10.max_calls_per_session,
+                max_wall_clock_secs=cfg.t10.max_wall_clock_secs,
+                loop_depth_limit=cfg.t10.loop_depth_limit,
+                heartbeat_interval_secs=cfg.t10.heartbeat_interval_secs,
             ))
 
-        if enabled("T6"):
-            t6 = t.get("T6", {})
+        if cfg.t6 is not None:
             engines.append(IntegrityEngine(
-                fail_on_drift=t6.get("fail_on_drift", True),
-                tool_allowlist=t6.get("tool_allowlist"),
+                fail_on_drift=cfg.t6.fail_on_drift,
+                tool_allowlist=list(cfg.t6.tool_allowlist) if cfg.t6.tool_allowlist else None,
+                typosquat_distance=cfg.t6.typosquat_distance,
             ))
 
-        if enabled("T5"):
-            t5 = t.get("T5", {})
-            engines.append(PIIEngine(profile=t5.get("profile", "pci")))
+        if cfg.t5 is not None:
+            engines.append(PIIEngine(profile=cfg.t5.profile))
 
-        if enabled("T9"):
-            t9 = t.get("T9", {})
+        if cfg.t9 is not None:
             engines.append(TrustEngine(
-                max_output_length=t9.get("max_output_length", 32_768),
-                strip_injection_patterns=t9.get("strip_injection_patterns", True),
+                max_output_length=cfg.t9.max_output_length,
+                strip_injection_patterns=cfg.t9.strip_injection_patterns,
             ))
 
         return cls(engines)
@@ -175,6 +177,7 @@ class CoSAIGuard:
     async def open_session(self, ctx: CoSAIContext) -> CoSAIContext:
         for engine in self._engines:
             ctx = await engine.on_session_start(ctx)
+            set_context(ctx)
         return ctx
 
     async def close_session(self, ctx: CoSAIContext) -> None:
@@ -188,11 +191,13 @@ class CoSAIGuard:
     async def _run_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
         for engine in self._engines:
             ctx = await engine.on_request(ctx, req)
+            set_context(ctx)
         return ctx
 
     async def _run_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
-        for engine in reversed(self._engines):  # response chain runs in reverse
+        for engine in reversed(self._engines):
             ctx = await engine.on_response(ctx, resp)
+            set_context(ctx)
         return ctx
 
     # -------------------------------------------------------------------------
@@ -209,7 +214,6 @@ class CoSAIGuard:
         except ImportError:
             pass
 
-        # Fall back to ASGI
         from .adapters.fastapi import ArmorMiddleware
         return ArmorMiddleware(app, self)
 
@@ -240,7 +244,6 @@ class CoSAIGuard:
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 # TODO: apply per-tool engine subset and policy overrides
-                # For now, full guard applies — per-tool overrides are future work
                 return await fn(*args, **kwargs)
             return wrapper
         return decorator

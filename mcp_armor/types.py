@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import html
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
@@ -43,18 +43,33 @@ class Finding:
 
 @dataclass(frozen=True)
 class MCPRequest:
-    method: str                        # e.g. "tools/call"
+    method: str                              # e.g. "tools/call"
     params: MappingProxyType[str, Any]
     session_id: str
     raw_headers: MappingProxyType[str, str]
+    # URL query parameters — used by SessionEngine to detect session_id in URL (T7-002)
+    url_query_params: MappingProxyType[str, str] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    # Transport type — used by SessionEngine to detect cross-transport replay (T7-003)
+    transport: str = "http"
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any], session_id: str, headers: dict[str, str]) -> "MCPRequest":
+    def from_dict(
+        cls,
+        d: dict[str, Any],
+        session_id: str,
+        headers: dict[str, str],
+        url_query_params: dict[str, str] | None = None,
+        transport: str = "http",
+    ) -> "MCPRequest":
         return cls(
             method=str(d.get("method", "")),
             params=MappingProxyType(dict(d.get("params", {}))),
             session_id=session_id,
             raw_headers=MappingProxyType(headers),
+            url_query_params=MappingProxyType(url_query_params or {}),
+            transport=transport,
         )
 
 

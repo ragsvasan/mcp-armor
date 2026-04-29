@@ -451,7 +451,17 @@ class AuthEngine:
             )
         tenant = tenant_id or tid
 
-        return ctx.with_user(sub, tenant)
+        # Extract OAuth scopes for T2 AuthzEngine — stored in context, never logged raw
+        raw_scope = claims.get("scope", "")
+        raw_scopes_list = claims.get("scopes")
+        if isinstance(raw_scopes_list, list):
+            scopes: tuple[str, ...] = tuple(str(s) for s in raw_scopes_list)
+        elif isinstance(raw_scope, str) and raw_scope:
+            scopes = tuple(raw_scope.split())
+        else:
+            scopes = ()
+
+        return ctx.with_user(sub, tenant).with_scopes(scopes)
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
         return ctx
