@@ -40,7 +40,7 @@ class ResourceEngine:
         max_wall_clock_secs: float = 300.0,
         loop_depth_limit: int = 10,
         heartbeat_interval_secs: float = 30.0,
-        max_arg_depth: int = 20,
+        max_arg_depth: int = 15,
     ) -> None:
         self._max_calls = max_calls_per_session
         self._max_wall = max_wall_clock_secs
