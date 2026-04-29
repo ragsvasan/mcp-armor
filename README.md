@@ -75,6 +75,16 @@ response = await protected({"method": "tools/call", "params": {...}})
 
 See [cosai.yaml.example](cosai.yaml.example) for the full configuration reference and [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for a step-by-step guide.
 
+## Using mcp-armor with TypeScript / non-Python servers
+
+mcp-armor is a Python library and cannot be imported into a TypeScript or Node.js project directly. If your MCP server is written in TypeScript (or any other language), run mcp-armor as a **sidecar proxy** — it sits in front of your server, enforces all 12 CoSAI controls on every request, and forwards clean traffic to your server over HTTP.
+
+```
+MCP Client → mcp-armor sidecar (Python, :8000) → Your TS server (:3000)
+```
+
+See [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md) for the full setup guide, Docker Compose example, and notes on a future native TypeScript port.
+
 ## Design
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture, three-layer call path model, and design decisions.
