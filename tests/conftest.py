@@ -12,8 +12,8 @@ from mcp_armor.context import CoSAIContext
 from mcp_armor.types import BudgetState, MCPRequest, MCPResponse
 
 
-def make_ctx(session_id: str | None = None) -> CoSAIContext:
-    return CoSAIContext.new(session_id or str(uuid.uuid4()))
+def make_ctx(session_id: str | None = None, transport: str = "http") -> CoSAIContext:
+    return CoSAIContext.new(session_id or str(uuid.uuid4()), transport=transport)
 
 
 def make_request(
@@ -21,12 +21,14 @@ def make_request(
     params: dict | None = None,
     headers: dict | None = None,
     session_id: str | None = None,
+    transport: str = "http",
 ) -> MCPRequest:
     return MCPRequest(
         method=method,
         params=MappingProxyType(params or {}),
         session_id=session_id or str(uuid.uuid4()),
         raw_headers=MappingProxyType(headers or {}),
+        transport=transport,
     )
 
 
