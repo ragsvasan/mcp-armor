@@ -104,6 +104,13 @@ These are deliberate design choices, not bugs.
 response is blocked. There is no scrub-and-forward mode. This is the conservative choice
 for 0.1.0; redaction support is planned for a future release.
 
+**T6 — drift detection is per-call-chain only on the HTTP adapter.** `ArmorMiddleware`
+creates a fresh `CoSAIContext` per HTTP request and does not restore session state between
+requests, so `IntegrityEngine`'s mid-session rug-pull detection (T6-001) cannot fire
+across separate HTTP round-trips. It works correctly within a single call chain. All other
+T6 checks (allowlist, typosquat, homoglyph, shadow) fire on every `tools/list` response.
+Fix planned; see [SECURITY.md](SECURITY.md#known-limitations) for the full write-up.
+
 **T10 — heartbeat not enforced.** The `heartbeat_interval_secs` config key is accepted
 and documented but the background monitor that marks sessions dead after a missed heartbeat
 is not yet implemented. Active sessions are still bounded by `max_wall_clock_secs`.
@@ -138,7 +145,7 @@ identified as integration-coverage gaps:
 | Area | Tests | What is asserted |
 |------|-------|-----------------|
 | Response blocking (Finding 1) | 7 | SSN / JWT / API key / CC / prompt injection in upstream response — client gets opaque error, sensitive body absent from reply |
-| `tools/list` enforcement (Finding 2) | 8 | Unallowlisted, typosquatted, homoglyph, duplicate, unsigned, drifted manifests blocked through middleware and dispatcher |
+| `tools/list` enforcement (Finding 2) | 8 | Unallowlisted, typosquatted, homoglyph, duplicate, and unsigned manifests blocked through middleware and dispatcher; drift detection tested within a single call chain (see Known Limitations) |
 | SSRF via `tools/call` (Finding 3) | 9 | RFC1918 / loopback / link-local / localhost URLs in arguments blocked; public IPs pass |
 | `tool_allowlist` config semantics (Finding 4) | 6 | `[]` blocks all; `None` allows all; named list is exact-match |
 | Malformed JSON-RPC fuzz (Finding 6) | 11 | `[]`, `null`, `"string"`, `1`, `true`, batch, non-JSON, wrong Content-Type, oversized body, params-as-array — all return JSON-RPC errors |

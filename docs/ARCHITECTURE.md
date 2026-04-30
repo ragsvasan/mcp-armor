@@ -126,8 +126,8 @@ Custom engines: implement `ProtectionEngine`, pass to `CoSAIGuard([..., MyEngine
 | `AuditEngine` | `engines/audit.py` | T12 | 1 open, 2 request, 3 response, 1 close |
 | `AuthEngine` | `engines/auth.py` | T1 | 1 (every request) |
 | `SessionEngine` | `engines/session.py` | T7 | 1 |
-| `NetworkEngine` | `engines/network.py` | T8 | startup only |
-| `SupplyChainEngine` | `engines/supply_chain.py` | T11 | startup only |
+| `NetworkEngine` | `engines/network.py` | T8 | startup (bind check) + 2 (SSRF in tool args) |
+| `SupplyChainEngine` | `engines/supply_chain.py` | T11 | startup (register) + 2 (tool call) + 3 (tools/list response) |
 | `AuthzEngine` | `engines/authz.py` | T2 | 2 |
 | `ValidationEngine` | `engines/validation.py` | T3 | 2 |
 | `BoundaryEngine` | `engines/boundary.py` | T4 | 2 (request) + 3 (response) |
@@ -151,14 +151,18 @@ CoSAIException
 ├── PIILeakError             T5  → 500  / -32004
 ├── IntegrityError           T6  → 500  / -32005
 ├── SessionError             T7  → 401  / -32006
-├── NetworkBindingError      T8  → startup only
+├── NetworkBindingError      T8  → startup / -32008 (also raised at request time for SSRF)
 ├── TrustBoundaryViolation   T9  → 500  / -32007
 ├── ResourceExceededError    T10 → 429  / -32010
-├── SupplyChainError         T11 → startup only
+├── SupplyChainError         T11 → startup / -32011 (also raised at request + response time)
 └── AuditChainError          T12 → 500  / -32009
 ```
 
-Startup-only exceptions (T8, T11) prevent the server from starting in an insecure configuration. There is no request-time fallback.
+`NetworkBindingError` and `SupplyChainError` are raised at startup for misconfigured bind
+addresses and invalid tool allowlists respectively — preventing the server from starting in
+an insecure state. They are also raised at request time: `NetworkEngine` checks every
+`tools/call` argument for SSRF targets; `SupplyChainEngine` validates the tool name on
+every `tools/call` and re-validates the full manifest on every `tools/list` response.
 
 ---
 
