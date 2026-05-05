@@ -342,3 +342,87 @@ def test_regression_confirm_token_non_string_types_denied() -> None:
     # Re-issue since first consume fails (token not consumed)
     store.issue(sid, "tool")
     assert store.consume(sid, "tool", str(0)) is False
+
+
+# ---------------------------------------------------------------------------
+# T2-004b: filter_tools_list — scope-filtered manifest (cosai-mcp T02-004)
+# ---------------------------------------------------------------------------
+
+def test_filter_tools_list_hides_tool_requiring_missing_scope() -> None:
+    """Caller without write scope must not see tools that require it."""
+    eng = _engine(
+        policies={
+            "read_data": _policy(required_scopes=("data:read",)),
+            "write_data": _policy(required_scopes=("data:write",)),
+        },
+        default_deny=False,
+    )
+    ctx = _ctx_with_user(scopes=("data:read",))
+    visible = eng.filter_tools_list(["read_data", "write_data"], ctx)
+    assert visible == ["read_data"]
+
+
+def test_filter_tools_list_shows_all_when_caller_has_all_scopes() -> None:
+    """Caller with all scopes sees all tools."""
+    eng = _engine(
+        policies={
+            "read_data": _policy(required_scopes=("data:read",)),
+            "write_data": _policy(required_scopes=("data:write",)),
+        },
+        default_deny=False,
+    )
+    ctx = _ctx_with_user(scopes=("data:read", "data:write"))
+    visible = eng.filter_tools_list(["read_data", "write_data"], ctx)
+    assert set(visible) == {"read_data", "write_data"}
+
+
+def test_filter_tools_list_default_deny_hides_unknown_tools() -> None:
+    """With default_deny=True, tools not in policy are hidden from the manifest."""
+    eng = _engine(
+        policies={"allowed": _policy()},
+        default_deny=True,
+    )
+    ctx = _ctx_with_user()
+    visible = eng.filter_tools_list(["allowed", "unknown_tool"], ctx)
+    assert visible == ["allowed"]
+
+
+def test_filter_tools_list_default_allow_shows_unknown_tools() -> None:
+    """With default_deny=False, tools not in policy are visible to all callers."""
+    eng = _engine(policies={}, default_deny=False)
+    ctx = _ctx_with_user()
+    visible = eng.filter_tools_list(["any_tool", "another_tool"], ctx)
+    assert set(visible) == {"any_tool", "another_tool"}
+
+
+def test_filter_tools_list_empty_input_returns_empty() -> None:
+    eng = _engine(default_deny=False)
+    ctx = _ctx_with_user()
+    assert eng.filter_tools_list([], ctx) == []
+
+
+def test_filter_tools_list_hides_admin_tools_from_read_only_caller() -> None:
+    """Read-only caller must not discover admin/purge tool names (T02-004 D-05)."""
+    eng = _engine(
+        policies={
+            "list_items": _policy(required_scopes=("items:read",)),
+            "admin_reset": _policy(required_scopes=("admin",)),
+            "purge_all": _policy(required_scopes=("admin",)),
+        },
+        default_deny=True,
+    )
+    ctx = _ctx_with_user(scopes=("items:read",))
+    visible = eng.filter_tools_list(["list_items", "admin_reset", "purge_all"], ctx)
+    assert visible == ["list_items"]
+    assert "admin_reset" not in visible
+    assert "purge_all" not in visible
+
+
+def test_regression_filter_tools_list_no_authz_engine_passthrough() -> None:
+    """CoSAIGuard.filter_tools_list returns all names when no AuthzEngine is configured."""
+    from mcp_armor.guard import CoSAIGuard
+    from mcp_armor.engines.session import SessionEngine
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    ctx = make_ctx()
+    names = ["tool_a", "tool_b"]
+    assert guard.filter_tools_list(names, ctx) == names

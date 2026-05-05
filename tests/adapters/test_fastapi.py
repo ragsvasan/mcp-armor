@@ -706,3 +706,195 @@ async def test_regression_identity_content_encoding_allowed() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "error" not in data or data.get("error", {}).get("code") != -32600
+
+
+# ---------------------------------------------------------------------------
+# T10-004: ResourceExceededError → HTTP 429 (not JSON-RPC 200) + Retry-After
+# ---------------------------------------------------------------------------
+
+class _AlwaysRateLimitEngine:
+    """Stub engine that unconditionally raises ResourceExceededError on tools/call."""
+
+    async def on_startup(self) -> None: pass
+    async def on_session_start(self, ctx): return ctx
+    async def on_session_end(self, ctx) -> None: pass
+    async def on_shutdown(self) -> None: pass
+    async def on_response(self, ctx, resp): return ctx
+
+    async def on_request(self, ctx, req):
+        from mcp_armor.exceptions import ResourceExceededError
+        if req.method == "tools/call":
+            raise ResourceExceededError("stub: rate limit exceeded")
+        return ctx
+
+
+async def test_resource_exceeded_returns_http_429() -> None:
+    """ResourceExceededError must yield HTTP 429, not JSON-RPC 200, so HTTP-layer rate-
+    limiters and cosai-mcp T10-004 probes can detect it (T10-004 / cosai-mcp T10-004)."""
+    from mcp_armor.guard import CoSAIGuard
+
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), _AlwaysRateLimitEngine()])
+    app = _make_app(guard)
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+        resp = await client.post(
+            "/",
+            json=_payload("tools/call", {"name": "t", "arguments": {}}),
+            headers={"mcp-session-id": session_id},
+        )
+    assert resp.status_code == 429
+    assert "retry-after" in resp.headers
+    data = resp.json()
+    assert data["error"]["code"] == -32010
+
+
+async def test_resource_exceeded_retry_after_header_value() -> None:
+    """Retry-After header must be present and parseable as a positive integer."""
+    from mcp_armor.guard import CoSAIGuard
+
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), _AlwaysRateLimitEngine()])
+    app = _make_app(guard)
+    async with _client(app) as client:
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+        resp = await client.post(
+            "/",
+            json=_payload("tools/call", {"name": "t", "arguments": {}}),
+            headers={"mcp-session-id": session_id},
+        )
+    assert resp.status_code == 429
+    retry_after = int(resp.headers["retry-after"])
+    assert retry_after > 0
+
+
+# ---------------------------------------------------------------------------
+# T7-001 / cosai-mcp T07-001: CORS origin validation
+# ---------------------------------------------------------------------------
+
+async def _make_cors_app(cors_origins: list[str] | None) -> ArmorMiddleware:
+    """Build an ArmorMiddleware with a specific cors_origins setting."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    inner = Starlette(routes=[Route("/{path:path}", _echo_handler, methods=["POST"])])
+    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    return ArmorMiddleware(inner, guard, cors_origins=cors_origins)
+
+
+async def test_cors_allowed_origin_passes() -> None:
+    """Requests from a permitted origin must succeed."""
+    app = await _make_cors_app(["https://app.example.com"])
+    async with _client(app) as client:
+        resp = await client.post(
+            "/",
+            json=_payload("initialize"),
+            headers={"Origin": "https://app.example.com"},
+        )
+    assert resp.status_code == 200
+    assert "error" not in resp.json()
+
+
+async def test_cors_disallowed_origin_rejected() -> None:
+    """Requests from an origin not in the allowlist must be rejected with -32600."""
+    app = await _make_cors_app(["https://app.example.com"])
+    async with _client(app) as client:
+        resp = await client.post(
+            "/",
+            json=_payload("initialize"),
+            headers={"Origin": "https://evil.example.com"},
+        )
+    assert resp.status_code == 200  # JSON-RPC errors are HTTP 200
+    data = resp.json()
+    assert data["error"]["code"] == -32600
+
+
+async def test_cors_no_origin_header_passes_when_configured() -> None:
+    """Requests without an Origin header are not CORS requests and must be allowed."""
+    app = await _make_cors_app(["https://app.example.com"])
+    async with _client(app) as client:
+        resp = await client.post("/", json=_payload("initialize"))
+    assert resp.status_code == 200
+    assert "error" not in resp.json()
+
+
+async def test_cors_empty_allowlist_blocks_all_cross_origin() -> None:
+    """cors_origins=[] means no origin is permitted — all cross-origin requests rejected."""
+    app = await _make_cors_app([])
+    async with _client(app) as client:
+        resp = await client.post(
+            "/",
+            json=_payload("initialize"),
+            headers={"Origin": "https://anything.example.com"},
+        )
+    data = resp.json()
+    assert data["error"]["code"] == -32600
+
+
+async def test_cors_unconfigured_emits_warning_and_passes(caplog) -> None:
+    """cors_origins=None (default) emits a startup warning but does not block requests."""
+    import logging
+    app = await _make_cors_app(None)
+    with caplog.at_level(logging.WARNING, logger="mcp_armor.adapters.fastapi"):
+        async with _client(app) as client:
+            resp = await client.post(
+                "/",
+                json=_payload("initialize"),
+                headers={"Origin": "https://anywhere.com"},
+            )
+    assert resp.status_code == 200
+    assert any("cors_origins not configured" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# T2-004b: tools/list scope filtering via ArmorMiddleware + AuthzEngine
+# ---------------------------------------------------------------------------
+
+async def test_tools_list_scope_filter_hides_unpermitted_tools() -> None:
+    """tools/list response must not expose tools the caller lacks scope for (T02-004 / D-05)."""
+    from mcp_armor.engines.authz import AuthzEngine
+    from mcp_armor.config import ToolPolicy
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    # Inner app returns two tools: one public, one admin
+    async def _tools_list_handler(request: Request) -> JSONResponse:
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {"name": "list_items", "description": "read items"},
+                    {"name": "admin_purge", "description": "purge everything"},
+                ]
+            }
+        })
+
+    inner = Starlette(routes=[Route("/{path:path}", _tools_list_handler, methods=["POST"])])
+    guard = CoSAIGuard([
+        SessionEngine(bind_to_dpop=False),
+        AuthzEngine(
+            tool_policies={
+                "list_items": ToolPolicy(required_scopes=("items:read",), user_only=False, destructive=False, tenant_isolated=False),
+                "admin_purge": ToolPolicy(required_scopes=("admin",), user_only=False, destructive=False, tenant_isolated=False),
+            },
+            default_deny=False,
+        ),
+    ])
+    app = ArmorMiddleware(inner, guard)
+
+    async with _client(app) as client:
+        # Establish session
+        init_resp = await client.post("/", json=_payload("initialize"))
+        session_id = init_resp.headers["mcp-session-id"]
+        # Call tools/list as a read-only caller (no admin scope on context)
+        resp = await client.post(
+            "/",
+            json=_payload("tools/list"),
+            headers={"mcp-session-id": session_id},
+        )
+
+    data = resp.json()
+    tools = data["result"]["tools"]
+    tool_names = [t["name"] for t in tools]
+    # admin_purge must be hidden — caller has no scopes, admin_purge requires admin
+    assert "admin_purge" not in tool_names

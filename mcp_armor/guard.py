@@ -219,6 +219,19 @@ class CoSAIGuard:
             set_context(ctx)
         return ctx
 
+    def filter_tools_list(self, tool_names: list[str], ctx: CoSAIContext) -> list[str]:
+        """Delegate tools/list scope filtering to AuthzEngine (T2-004b).
+
+        Returns only the tool names the caller is authorised to see.  Called by
+        adapters after the upstream app returns a tools/list response, before the
+        response is forwarded to the client.
+        """
+        from .engines.authz import AuthzEngine
+        for engine in self._engines:
+            if isinstance(engine, AuthzEngine):
+                return engine.filter_tools_list(tool_names, ctx)
+        return tool_names  # no AuthzEngine configured — pass-through
+
     # -------------------------------------------------------------------------
     # Framework integration
     # -------------------------------------------------------------------------

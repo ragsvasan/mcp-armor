@@ -41,6 +41,9 @@ _OPAQUE_MESSAGES: dict[int, str] = {
 # Body size cap enforced during buffering — before deserialization (FIX-4)
 _DEFAULT_MAX_BODY = 65_536
 
+# Sentinel: CORS wildcard — never permitted on an MCP endpoint (T7-001 / cosai-mcp T07-001)
+_CORS_WILDCARD = "*"
+
 
 class ArmorMiddleware:
     """
@@ -75,10 +78,23 @@ class ArmorMiddleware:
         app: Any,
         guard: "CoSAIGuard",
         max_body_bytes: int = _DEFAULT_MAX_BODY,
+        cors_origins: list[str] | None = None,
     ) -> None:
         self._app = app
         self._guard = guard
         self._max_body_bytes = max_body_bytes
+        # CORS allowlist — None means "no CORS validation configured" (emits startup warning).
+        # Set to a list of permitted origins to enforce; wildcard ("*") is never permitted.
+        self._cors_origins: frozenset[str] | None = (
+            frozenset(cors_origins) if cors_origins is not None else None
+        )
+        if self._cors_origins is None:
+            log.warning(
+                "ArmorMiddleware: cors_origins not configured — CORS policy is NOT enforced. "
+                "Set cors_origins=[] to block all cross-origin requests, or list your "
+                "permitted origins. A wildcard on the MCP endpoint allows any web page to "
+                "make credentialed requests (T7-001 / cosai-mcp T07-001)."
+            )
         # Tracks open sessions for clean shutdown — session_id → CoSAIContext
         self._active_sessions: dict[str, Any] = {}
 
@@ -163,6 +179,17 @@ class ArmorMiddleware:
             k.decode("latin-1"): v.decode("latin-1")
             for k, v in scope.get("headers", [])
         }
+
+        # T7-001 / T07-001: CORS origin validation.
+        # If cors_origins is configured, reject requests whose Origin header is not
+        # in the allowlist.  A wildcard ACAO on the MCP endpoint lets any web page
+        # make credentialed requests on behalf of an authenticated user.
+        request_origin = raw_headers.get("origin", "")
+        if self._cors_origins is not None and request_origin:
+            if request_origin not in self._cors_origins:
+                await _send_error(send, None, -32600,
+                                  "Origin not in CORS allowlist (T7-001)")
+                return
 
         # Reject compressed bodies before buffering — the pre-parse size cap covers
         # raw bytes only; decompressed content is unbounded (CoSAI CodeGuard
@@ -250,8 +277,14 @@ class ArmorMiddleware:
             set_context(ctx)
 
         except CoSAIException as exc:
-            # FIX-5: log full detail internally; send opaque message to client
+            # FIX-5: log full detail internally; send opaque message to client.
+            # T10-004: ResourceExceededError is returned as HTTP 429 (not JSON-RPC 200)
+            # so that HTTP-layer rate-limiters (proxies, cosai-mcp T10-004 probe) detect it.
             log.warning("Guard rejected request [%s]: %s", exc.__class__.__name__, exc)
+            from ..exceptions import ResourceExceededError
+            if isinstance(exc, ResourceExceededError):
+                await _send_rate_limited(send, request_id)
+                return
             client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Request rejected")
             await _send_error(send, request_id, exc.json_rpc_code, client_msg)
             return
@@ -315,6 +348,42 @@ class ArmorMiddleware:
             await _send_error(send, request_id, -32603, "Internal error")
             return
 
+        # T2-004b / cosai-mcp T02-004: scope-filter the tools/list manifest.
+        # A caller must not discover tool names they cannot call.  Re-serialise the
+        # filtered manifest and update content-length so the client receives a
+        # consistent response.
+        if method == "tools/list" and resp_dict:
+            tools_result = resp_dict.get("result", {})
+            if isinstance(tools_result, dict):
+                raw_tools = tools_result.get("tools", [])
+                if isinstance(raw_tools, list):
+                    tool_names = [
+                        t.get("name", "") for t in raw_tools if isinstance(t, dict)
+                    ]
+                    allowed_names = set(self._guard.filter_tools_list(tool_names, ctx))
+                    filtered_tools = [
+                        t for t in raw_tools
+                        if isinstance(t, dict) and t.get("name") in allowed_names
+                    ]
+                    if len(filtered_tools) != len(raw_tools):
+                        filtered_resp = {
+                            **resp_dict,
+                            "result": {**tools_result, "tools": filtered_tools},
+                        }
+                        resp_raw = json.dumps(filtered_resp).encode()
+                        # Patch content-length in the already-captured start message.
+                        if response_start_msg is not None:
+                            patched_headers = [
+                                (k, v) for k, v in response_start_msg.get("headers", [])
+                                if k.lower() != b"content-length"
+                            ]
+                            patched_headers.append(
+                                (b"content-length", str(len(resp_raw)).encode())
+                            )
+                            response_start_msg = {
+                                **response_start_msg, "headers": patched_headers
+                            }
+
         # Guard passed — replay buffered response to client.
         if response_start_msg is not None:
             await send(response_start_msg)
@@ -352,6 +421,31 @@ async def _send_error(send: Send, request_id: Any, code: int, message: str) -> N
         "headers": [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+async def _send_rate_limited(send: Send, request_id: Any) -> None:
+    """Send HTTP 429 Too Many Requests for ResourceExceededError (T10-004).
+
+    HTTP 429 is used instead of JSON-RPC 200 so that:
+    - HTTP-layer rate-limit proxies (nginx, cloud WAFs) can detect and act on it
+    - cosai-mcp T10-004 probe (which checks response.status_code status_in [429, 503]) passes
+    - RFC 6585 §4 is honoured: rate limit responses at the HTTP layer, not buried in JSON-RPC
+    """
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {"code": -32010, "message": "Rate limit exceeded — retry after 60 seconds"},
+    }).encode()
+    await send({
+        "type": "http.response.start",
+        "status": 429,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            (b"retry-after", b"60"),
         ],
     })
     await send({"type": "http.response.body", "body": body, "more_body": False})

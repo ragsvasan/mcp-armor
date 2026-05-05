@@ -100,6 +100,7 @@ class AuthzEngine:
     - T2-002: Confused deputy (server-to-server request executing user-only tool)
     - T2-003: Multi-tenant data bleed (tenant_id isolation — default-deny when absent)
     - T2-004: Destructive one-shot execution (two-stage commit gate, CoSAI CodeGuard T02-003)
+    - T2-004b: tools/list manifest scope filtering (cosai-mcp T02-004)
 
     All decisions are deterministic policy — no LLM judgment in the auth path.
 
@@ -206,6 +207,33 @@ class AuthzEngine:
                 )
 
         return ctx
+
+    def filter_tools_list(self, tool_names: list[str], ctx: CoSAIContext) -> list[str]:
+        """Return only the tool names the caller is allowed to see (T2-004b).
+
+        A caller must not discover tool names they cannot call — leaking admin,
+        purge, or write-scope tool names to read-only callers exposes attack surface.
+
+        Rules:
+        - If the tool has no policy entry and default_deny is False → visible.
+        - If the tool has no policy entry and default_deny is True → hidden.
+        - If the tool has required_scopes the caller lacks → hidden.
+        - Otherwise → visible.
+        """
+        caller_scopes = set(ctx.scopes)
+        visible: list[str] = []
+        for name in tool_names:
+            policy = self._policies.get(name)
+            if policy is None:
+                if not self._default_deny:
+                    visible.append(name)
+                # default_deny=True → omit unknown tools from the manifest
+                continue
+            required = set(policy.required_scopes)
+            if required and not required.issubset(caller_scopes):
+                continue  # caller lacks scope → hide this tool
+            visible.append(name)
+        return visible
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
         return ctx
