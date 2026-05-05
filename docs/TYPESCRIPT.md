@@ -33,7 +33,15 @@ UPSTREAM = "http://localhost:3000"
 
 inner = FastAPI()
 guard = CoSAIGuard.from_config("cosai.yaml")
-app = ArmorMiddleware(inner, guard)
+app = ArmorMiddleware(
+    inner,
+    guard,
+    # List every origin that is allowed to make cross-origin requests to this
+    # MCP endpoint (T7-001 / cosai-mcp T07-001).  A CORS wildcard (*) lets any
+    # web page make credentialed requests on behalf of an authenticated user —
+    # never use "*" here.  Set to [] to block all cross-origin requests.
+    cors_origins=["https://your-app.example.com"],
+)
 
 
 @inner.post("/")
@@ -104,10 +112,10 @@ Every CoSAI control runs at the sidecar layer:
 | T4 Prompt injection | Both request args and TS server response |
 | T5 PII scrubbing | On response from TS server |
 | T6 Tool manifest integrity | At sidecar startup |
-| T7 Session fixation | Before request reaches TS server |
+| T7 Session fixation + CORS origin enforcement | Before request reaches TS server |
 | T8 SSRF / network binding | At sidecar startup |
 | T9 LLM output sanitization | On response from TS server |
-| T10 Resource budgets | Per session in sidecar |
+| T10 Resource budgets + HTTP 429 + Retry-After | Per session in sidecar |
 | T11 Supply chain | At sidecar startup |
 | T12 Audit log | Every request + response, in sidecar |
 
