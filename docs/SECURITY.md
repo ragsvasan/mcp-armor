@@ -59,7 +59,7 @@ The following are known limitations, not vulnerabilities. They are documented he
 
 2. **ProtectionEngine blocks, does not redact:** When PII is detected in a tool response, the response is blocked entirely. It is not scrubbed/redacted and forwarded. This is a conservative choice — some deployments may need redaction instead of blocking.
 
-3. **RE2 fallback:** If `google-re2` is not installed, mcp-armor falls back to stdlib `re`. A crafted input could cause catastrophic backtracking against the injection patterns. Install `google-re2` in production.
+3. **RE2 fallback (partially mitigated):** If `google-re2` is not installed, mcp-armor falls back to stdlib `re`. `BoundaryEngine._scan()` truncates strings to 8,192 chars before pattern matching to bound worst-case time, but this is defence-in-depth, not a complete fix. Install `google-re2` in production for linear-time guarantees.
 
 4. **IntegrityEngine drift detection is per-call-chain only (HTTP adapter):** `ArmorMiddleware` creates a fresh `CoSAIContext` for each HTTP request and does not restore session context between requests. As a result, `IntegrityEngine`'s mid-session drift detection (T6-001 — rug-pull) does not fire across separate HTTP round-trips; the manifest hash accumulated in one request's ctx is not visible to the next. Drift detection works correctly within a single call chain (e.g. `wrap_dispatcher` where the same ctx is threaded through, or a long-running streaming session). Fix planned: persist and restore ctx in `_active_sessions` across requests. Workaround: call `register_tool_schemas()` at startup to snapshot the baseline manifest — supply chain and integrity checks still fire on every `tools/list` response for allowlist, typosquat, homoglyph, and shadow violations.
 

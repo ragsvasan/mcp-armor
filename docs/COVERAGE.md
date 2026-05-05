@@ -1,8 +1,8 @@
 # mcp-armor — Coverage Status
 
 **Version:** 0.1.0  
-**Date:** 2026-04-29  
-**Tests:** 441 passing · Coverage: 90%+
+**Date:** 2026-05-04  
+**Tests:** 450 passing · Coverage: 90%+
 
 All 12 CoSAI threat engines are fully implemented and tested. No stubs remain.
 
@@ -57,6 +57,8 @@ asserts the client receives only an opaque error, never the sensitive or injecte
 | Injection in tool call arguments | T4-004 | ✅ Done | `BoundaryEngine` | `test_regression_injection_in_tool_name_param_detected` |
 | Injection in tool response body | T4-005 | ✅ Done | `BoundaryEngine` | `test_injection_in_response_raises` |
 | Nested dict injection (indirect) | T4-006 | ✅ Done | `BoundaryEngine` | `test_nested_dict_injection_detected` |
+| Injection in tool manifest description | T4-007 | ✅ Done | `BoundaryEngine` | `test_regression_injection_in_tool_description_detected` |
+| Compressed body (gzip/deflate) | T3-005 | ✅ Done | `ArmorMiddleware` | `test_regression_gzip_content_encoding_rejected` |
 | SSN in response | T5-001 | ✅ Done | `ProtectionEngine` | `test_ssn_in_response_blocked_pci` |
 | Credit card in response | T5-002 | ✅ Done | `ProtectionEngine` | `test_credit_card_in_response_blocked_pci` |
 | JWT token in response | T5-003 | ✅ Done | `ProtectionEngine` | `test_jwt_in_response_blocked_pci` |

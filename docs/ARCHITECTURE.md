@@ -202,7 +202,7 @@ mcp_armor/
     auth.py            T1: bearer token + DPoP validation
     authz.py           T2: per-tool RBAC, confused deputy prevention
     validation.py      T3: JSON schema strict mode + injection guards
-    boundary.py        T4: 18 injection patterns, request + response scan
+    boundary.py        T4: 24 injection patterns, request + response scan (incl. manifest descriptions)
     protection.py      T5: PII scrubbing (5 RE2-based profiles)
     integrity.py       T6: SHA-256 manifest hash + drift detection
     session.py         T7: session binding, fixation prevention
@@ -238,7 +238,7 @@ This eliminates a class of bugs where mutable containers leak across async task 
 
 All regex-based detection (T4, T5, T9) uses `google-re2` (linear time, no backtracking). Catastrophic backtracking on attacker-controlled input is a DoS vector.
 
-Import fallback: if `re2` is not installed, the library falls back to stdlib `re` with a warning. This is acceptable for development. Production deployments should have `google-re2` installed.
+Import fallback: if `re2` is not installed, the library falls back to stdlib `re` with a warning. This is acceptable for development. Production deployments should have `google-re2` installed. As an additional defence-in-depth measure, `BoundaryEngine._scan()` truncates strings to `_MAX_SCAN_LEN` (8,192 chars) before pattern matching — injection phrases are short, so this creates no detection gap while bounding worst-case regex time.
 
 Pattern validation: all patterns are compiled at engine construction time. A pattern that `re2` rejects raises `UnsafePatternError` at startup — not at runtime.
 

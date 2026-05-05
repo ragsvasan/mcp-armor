@@ -6,6 +6,16 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Input validation hardening** (three gaps closed):
+  - **T4-003 — Tool manifest description scanning:** `BoundaryEngine.on_response` now scans
+    every tool `description` field from `tools/list` responses against the full 24-pattern
+    injection library. A poisoned tool description raises `InjectionDetectedError(T4-003)`
+    before the manifest is accepted. Gated by the existing `scan_responses` flag.
+  - **ReDoS length cap:** `BoundaryEngine._scan()` truncates strings to `_MAX_SCAN_LEN`
+    (8,192 chars) before regex scanning to bound worst-case time when `google-re2` is absent.
+  - **Compression bomb defence:** `ArmorMiddleware` rejects any `Content-Encoding` other than
+    `identity` with `-32600` before buffering begins. The pre-parse byte cap previously only
+    covered raw bytes; a gzip bomb could produce an unbounded decompressed payload.
 - **P2 — Typed config system**: `ArmorConfig` frozen dataclasses, `load_config()` with
   unknown-key rejection; `CoSAIContext.scopes` and `.transport` fields; guard factory wired
   to `ArmorConfig`
