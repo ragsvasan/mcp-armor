@@ -60,7 +60,11 @@ from mcp_armor.adapters.fastapi import ArmorMiddleware
 
 inner = FastAPI()
 guard = CoSAIGuard.from_config("cosai.yaml")
-app = ArmorMiddleware(inner, guard)
+app = ArmorMiddleware(
+    inner,
+    guard,
+    cors_origins=["https://app.example.com"],  # required for CORS enforcement (T7-001)
+)
 ```
 
 **Raw JSON-RPC dispatcher:**

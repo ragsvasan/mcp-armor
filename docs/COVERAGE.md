@@ -47,6 +47,7 @@ asserts the client receives only an opaque error, never the sensitive or injecte
 | Destructive tool without confirm token | T2-004 | ✅ Done | `AuthzEngine` | `test_destructive_tool_no_token_denied` |
 | Confirm token reuse (single-use) | T2-005 | ✅ Done | `AuthzEngine` | `test_destructive_token_single_use` |
 | Token cross-tool replay | T2-006 | ✅ Done | `AuthzEngine` | `test_regression_confirm_token_not_transferable_across_tools` |
+| tools/list scope filter (T02-004/D-05) | T2-007 | ✅ Done | `AuthzEngine` + `ArmorMiddleware` | `test_filter_tools_list_hides_tool_requiring_missing_scope`, `test_tools_list_scope_filter_hides_unpermitted_tools` |
 | Oversized payload | T3-001 | ✅ Done | `ValidationEngine` | `test_oversized_payload_rejected` |
 | Shell metacharacters in arguments | T3-002 | ✅ Done | `ValidationEngine` | `test_shell_injection_in_args_rejected` |
 | Path traversal | T3-003 | ✅ Done | `ValidationEngine` | `test_path_traversal_in_args_rejected` |
@@ -76,6 +77,7 @@ asserts the client receives only an opaque error, never the sensitive or injecte
 | Fabricated session_id on initialize | T7-005 | ✅ Done | `SessionEngine` | `test_initialize_also_checks_session_is_known` |
 | Context bleed after session close | T7-006 | ✅ Done | `SessionEngine` | `test_session_cleared_on_end` |
 | Session resource leak | T7-007 | ✅ Done | `_GuardedToolDispatcher` | `test_regression_close_session_fires_when_run_request_raises` |
+| CORS wildcard on MCP endpoint (T07-001/G-02) | T7-008 | ✅ Done | `ArmorMiddleware` | `test_cors_disallowed_origin_rejected`, `test_cors_empty_allowlist_blocks_all_cross_origin` |
 | Server bound to 0.0.0.0 | T8-001 | ✅ Done | `NetworkEngine` | `test_wildcard_bind_rejected` |
 | SSRF to loopback | T8-002 | ✅ Done | `NetworkEngine` | `test_loopback_is_ssrf_target` |
 | SSRF to RFC1918 | T8-003 | ✅ Done | `NetworkEngine` | `test_rfc1918_10_is_ssrf_target` |
@@ -88,6 +90,7 @@ asserts the client receives only an opaque error, never the sensitive or injecte
 | Unbounded call count | T10-001 | ✅ Done | `ResourceEngine` | `test_call_budget_exceeded_raises` |
 | Wall-clock time exhaustion | T10-002 | ✅ Done | `ResourceEngine` | `test_wall_clock_exceeded_raises` |
 | Recursive tool call loops | T10-003 | ✅ Done | `ResourceEngine` | `test_loop_depth_exceeded_raises` |
+| Rate limit visible at HTTP layer (T10-004/H-03) | T10-004 | ✅ Done | `ArmorMiddleware` | `test_resource_exceeded_returns_http_429`, `test_resource_exceeded_retry_after_header_value` |
 | Unlisted tool loaded | T11-001 | ✅ Done | `SupplyChainEngine` | `test_unlisted_tool_denied` |
 | Typosquatted tool (d≤threshold) | T11-002 | ✅ Done | `SupplyChainEngine` | `test_typosquat_within_threshold_denied` |
 | Unicode homoglyph in tool name | T11-003 | ✅ Done | `SupplyChainEngine` | `test_nfkc_typosquat_within_threshold_denied` |

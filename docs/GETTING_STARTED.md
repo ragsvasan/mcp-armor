@@ -63,7 +63,11 @@ from mcp_armor.adapters.fastapi import ArmorMiddleware
 app = FastAPI()
 guard = CoSAIGuard.from_config("cosai.yaml")
 
-app.add_middleware(ArmorMiddleware, guard=guard)
+app.add_middleware(
+    ArmorMiddleware,
+    guard=guard,
+    cors_origins=["https://app.example.com"],  # restrict cross-origin access (T7-001)
+)
 
 @app.on_event("startup")
 async def startup():
@@ -75,6 +79,10 @@ async def shutdown():
 ```
 
 `guard.startup()` runs the startup-only checks (T8 network binding, T11 supply chain). It must be called before the server begins accepting requests. If either check fails, the exception propagates and the server does not start — fail-closed.
+
+**`cors_origins`** — set this to the list of origins allowed to make cross-origin requests to the MCP endpoint (T7-001 / cosai-mcp T07-001). Omitting it (default `None`) emits a startup warning. Use `cors_origins=[]` to block all cross-origin requests. Never use `"*"` — a CORS wildcard on the MCP endpoint allows any web page to make credentialed requests on behalf of an authenticated user.
+
+**Rate limiting and HTTP 429** — `ResourceExceededError` (raised by `ResourceEngine` when a session's call budget is exhausted) returns HTTP 429 with a `Retry-After: 60` header rather than a JSON-RPC 200 error, so HTTP-layer rate limiters and security scanners can detect it (T10-004 / cosai-mcp T10-004).
 
 ---
 

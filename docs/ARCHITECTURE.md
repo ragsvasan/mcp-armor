@@ -128,7 +128,7 @@ Custom engines: implement `ProtectionEngine`, pass to `CoSAIGuard([..., MyEngine
 | `SessionEngine` | `engines/session.py` | T7 | 1 |
 | `NetworkEngine` | `engines/network.py` | T8 | startup (bind check) + 2 (SSRF in tool args) |
 | `SupplyChainEngine` | `engines/supply_chain.py` | T11 | startup (register) + 2 (tool call) + 3 (tools/list response) |
-| `AuthzEngine` | `engines/authz.py` | T2 | 2 |
+| `AuthzEngine` | `engines/authz.py` | T2 | 2 + `filter_tools_list` (tools/list scope filter) |
 | `ValidationEngine` | `engines/validation.py` | T3 | 2 |
 | `BoundaryEngine` | `engines/boundary.py` | T4 | 2 (request) + 3 (response) |
 | `ResourceEngine` | `engines/resources.py` | T10 | 2 + 3 |

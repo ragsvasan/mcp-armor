@@ -32,6 +32,7 @@ verification test that proves the control works.
 | Confirm token reuse (single-use) | `AuthzEngine` | `test_destructive_token_single_use` |
 | Token cross-tool replay | `AuthzEngine` | `test_regression_confirm_token_not_transferable_across_tools` |
 | Timing oracle via self-referential compare | `AuthzEngine` | `test_regression_dummy_compare_uses_fixed_length_secret` |
+| tools/list discloses unpermitted tool names (D-05) | `AuthzEngine` + `ArmorMiddleware` | `test_filter_tools_list_hides_tool_requiring_missing_scope`, `test_tools_list_scope_filter_hides_unpermitted_tools` |
 
 **Standard**: OWASP API Security A01, A05; CoSAI CodeGuard §Destructive Tools.
 
@@ -100,8 +101,9 @@ verification test that proves the control works.
 | `initialize` with fabricated session_id | `SessionEngine` | `test_initialize_also_checks_session_is_known` |
 | Context bleed after session close | `SessionEngine` | `test_session_cleared_on_end` |
 | Session resource leak (no close_session) | `_GuardedToolDispatcher` | `test_regression_close_session_fires_when_run_request_raises` |
+| CORS wildcard on MCP endpoint (G-02) | `ArmorMiddleware` | `test_cors_disallowed_origin_rejected`, `test_cors_empty_allowlist_blocks_all_cross_origin` |
 
-**Standard**: OWASP Session Management Cheat Sheet, MCP spec §3.4.
+**Standard**: OWASP Session Management Cheat Sheet, MCP spec §3.4; OWASP CORS Cheat Sheet.
 
 ---
 
@@ -137,6 +139,7 @@ verification test that proves the control works.
 | Unbounded call count | `ResourceEngine` | `test_call_budget_exceeded_raises` |
 | Wall-clock time exhaustion | `ResourceEngine` | `test_wall_clock_exceeded_raises` |
 | Recursive tool call loops | `ResourceEngine` | `test_loop_depth_exceeded_raises` |
+| Rate limit hidden in JSON-RPC 200 (H-03) | `ArmorMiddleware` | `test_resource_exceeded_returns_http_429`, `test_resource_exceeded_retry_after_header_value` |
 
 ---
 
