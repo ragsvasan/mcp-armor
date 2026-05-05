@@ -74,8 +74,9 @@ CoSAI T1–T12 mapped to OWASP MCP Top 10, ISO 27001:2022, NIST AI RMF 2.0, and 
 **Core risk:** An attacker embeds LLM instructions in data that flows into the agent's context, hijacking the agent's behaviour without touching the application layer.
 
 **Sub-threats covered by `BoundaryEngine`:**
-- T4-001: Tool definition poisoning — injection in `description`, `name`, or `inputSchema` properties
-- T4-002: Indirect prompt injection — injection in tool call response bodies
+- T4-001: Call-argument injection — prompt injection patterns in `tools/call` arguments and tool name field
+- T4-002: Indirect prompt injection — injection in tool call response bodies (raw_body scan)
+- T4-003: Manifest description poisoning — injection in `description` fields of `tools/list` responses; detected at manifest registration time before any tool is invoked
 
 **Why black-box cannot detect T4:** a scanner cannot observe what content flows into the LLM's reasoning context. Only middleware in the call path can see this.
 

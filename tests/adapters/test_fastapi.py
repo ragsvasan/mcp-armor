@@ -659,3 +659,50 @@ async def test_regression_opaque_codes_validation_is_minus32602() -> None:
     from mcp_armor.adapters.fastapi import _OPAQUE_MESSAGES
     assert -32602 in _OPAQUE_MESSAGES
     assert _OPAQUE_MESSAGES[-32602] == "Validation error"
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: Compression bomb defence — Content-Encoding rejected before buffering
+# ---------------------------------------------------------------------------
+
+async def test_regression_gzip_content_encoding_rejected() -> None:
+    """Fix 3: Content-Encoding: gzip must be rejected before body buffering (-32600)."""
+    async with _client(_make_app()) as client:
+        resp = await client.post(
+            "/",
+            content=b"fake-gzip-body",
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            },
+        )
+    data = resp.json()
+    assert data["error"]["code"] == -32600
+
+
+async def test_regression_deflate_content_encoding_rejected() -> None:
+    """Fix 3: Content-Encoding: deflate must also be rejected before body buffering."""
+    async with _client(_make_app()) as client:
+        resp = await client.post(
+            "/",
+            content=b"fake-deflate-body",
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "deflate",
+            },
+        )
+    data = resp.json()
+    assert data["error"]["code"] == -32600
+
+
+async def test_regression_identity_content_encoding_allowed() -> None:
+    """Fix 3: Content-Encoding: identity (explicit no-op) must not be rejected."""
+    async with _client(_make_app()) as client:
+        resp = await client.post(
+            "/",
+            json=_payload("initialize"),
+            headers={"content-encoding": "identity"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "error" not in data or data.get("error", {}).get("code") != -32600

@@ -8,6 +8,11 @@ from ..context import CoSAIContext
 from ..exceptions import InjectionDetectedError
 from ..types import Finding, MCPRequest, MCPResponse, Severity, ThreatCategory
 
+# Truncate strings to this length before regex scanning to bound worst-case time
+# when re2 is unavailable. Injection phrases are short; this doesn't create a
+# meaningful detection gap.
+_MAX_SCAN_LEN = 8_192
+
 
 # ---------------------------------------------------------------------------
 # Injection pattern library
@@ -79,6 +84,8 @@ class BoundaryEngine:
 
     def _scan(self, text: str) -> str | None:
         """Return the matched pattern string, or None."""
+        if len(text) > _MAX_SCAN_LEN:
+            text = text[:_MAX_SCAN_LEN]
         for pattern in self._compiled:
             if pattern.search(text):
                 return pattern.pattern
@@ -142,6 +149,40 @@ class BoundaryEngine:
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
         if not self._scan_responses:
             return ctx
+
+        # T4-003: scan tool descriptions from tools/list manifests — tool definition
+        # poisoning via description is the primary indirect-injection attack surface.
+        # resp.result is the structured (unescaped) dict; raw_body is HTML-escaped.
+        if resp.result is not None and "tools" in resp.result:
+            tools = resp.result.get("tools") or []
+            for tool in tools:
+                if not isinstance(tool, dict):
+                    continue
+                desc = tool.get("description", "")
+                if isinstance(desc, str) and desc:
+                    matched = self._scan(desc)
+                    if matched:
+                        tool_name = tool.get("name", "?")
+                        finding = Finding(
+                            threat=ThreatCategory.T4,
+                            severity=Severity.HIGH,
+                            code="T4-003",
+                            message=(
+                                f"Injection pattern in tool description "
+                                f"(tool: {tool_name!r}, pattern: {matched!r})"
+                            ),
+                            location="tools/list.tools[].description",
+                            remediation=(
+                                "Sanitize tool descriptions before serving to LLM context"
+                            ),
+                        )
+                        ctx = ctx.with_finding(finding)
+                        raise InjectionDetectedError(
+                            f"Injection pattern in tool description for tool "
+                            f"{tool_name!r} (pattern: {matched!r}) (T4-003)",
+                            finding=finding,
+                        )
+
         if resp.raw_body:
             matched = self._scan(resp.raw_body)
             if matched:

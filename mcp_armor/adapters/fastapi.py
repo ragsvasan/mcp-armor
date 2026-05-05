@@ -157,6 +157,21 @@ class ArmorMiddleware:
         from ..context import CoSAIContext, set_context
         from ..exceptions import CoSAIException
 
+        # Decode headers early — needed before buffering for Content-Encoding and
+        # Content-Type checks. Decoding once here avoids a second pass later.
+        raw_headers: dict[str, str] = {
+            k.decode("latin-1"): v.decode("latin-1")
+            for k, v in scope.get("headers", [])
+        }
+
+        # Reject compressed bodies before buffering — the pre-parse size cap covers
+        # raw bytes only; decompressed content is unbounded (CoSAI CodeGuard
+        # §Protocol Hygiene / compression-bomb defence).
+        encoding = raw_headers.get("content-encoding", "").strip().lower()
+        if encoding and encoding != "identity":
+            await _send_error(send, None, -32600, "Content-Encoding is not supported")
+            return
+
         # FIX-4: cap body size during buffering, before deserialization
         body_parts: list[bytes] = []
         accumulated = 0
@@ -172,12 +187,6 @@ class ArmorMiddleware:
             body_parts.append(chunk)
             more = msg.get("more_body", False)
         raw_body = b"".join(body_parts)
-
-        # Decode headers and query string before Content-Type check
-        raw_headers: dict[str, str] = {
-            k.decode("latin-1"): v.decode("latin-1")
-            for k, v in scope.get("headers", [])
-        }
 
         # FIX-3: enforce Content-Type: application/json (CoSAI CodeGuard §Protocol Hygiene)
         if raw_body:
