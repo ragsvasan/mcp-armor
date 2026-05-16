@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import unquote_plus
 
@@ -244,8 +243,10 @@ class ArmorMiddleware:
         # Session resolution (MCP spec §3.4)
         method = payload.get("method", "")
         if method == "initialize":
-            # Server owns session identity — always CSPRNG-generated (T7-001)
-            session_id = str(uuid.uuid4())
+            # Server owns session identity — a stateless HMAC-signed token
+            # (T7-001). Self-verifying, so it survives horizontal scaling and
+            # instance recycling that the old per-process store could not.
+            session_id = self._guard.mint_session_id("http")
             is_new_session = True
         else:
             session_id = raw_headers.get(_SESSION_HEADER_STR, "")

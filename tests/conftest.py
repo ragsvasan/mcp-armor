@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from types import MappingProxyType
+
+# Stable session secret for the whole test suite so guard/SessionEngine builds
+# (which fail-closed without it) work everywhere. Tests that exercise the
+# fail-closed path use monkeypatch.delenv to remove it for that test only.
+os.environ.setdefault("ARMOR_SESSION_SECRET", "test-" + "s" * 40)
 
 import pytest
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 if TYPE_CHECKING:
@@ -29,10 +28,11 @@ def wrap_dispatcher(dispatcher: Dispatcher, guard: "CoSAIGuard") -> Dispatcher:
         from ..context import CoSAIContext, set_context
         from ..exceptions import CoSAIException, to_jsonrpc_error
 
-        # Session ID MUST be server-generated (CSPRNG). JSON-RPC `id` is for
+        # Session ID MUST be server-generated. JSON-RPC `id` is for
         # request-response correlation only — never derive session identity from it.
         # Using payload["id"] as session_id would allow session fixation (T7-001).
-        session_id = str(uuid.uuid4())
+        # Stateless signed token (transport "rpc") so SessionEngine.verify() accepts it.
+        session_id = guard.mint_session_id("rpc")
         req = MCPRequest.from_dict(payload, session_id=session_id, headers={}, transport="rpc")
         ctx = CoSAIContext.new(session_id)
         set_context(ctx)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import html
 import logging
-import uuid
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -111,7 +110,8 @@ class _GuardedToolDispatcher:
             from types import MappingProxyType
 
             # FIX-2: use caller-supplied transport, not hardcoded "stdio"
-            session_id = str(uuid.uuid4())
+            # Stateless signed token so SessionEngine.verify() accepts it.
+            session_id = self._guard.mint_session_id(transport)
             ctx = CoSAIContext.new(session_id, transport=transport)
             set_context(ctx)
 

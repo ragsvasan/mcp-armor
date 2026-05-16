@@ -444,9 +444,13 @@ async def test_regression_upstream_session_header_stripped() -> None:
     session_ids = init_resp.headers.get_list("mcp-session-id")
     assert len(session_ids) == 1
     assert session_ids[0] != "upstream-generated-session-jwt-abc123"
-    # Must be a valid UUID (armor-generated)
-    import uuid as _uuid
-    _uuid.UUID(session_ids[0])
+    # Must be an armor-issued stateless token that armor's own SessionEngine
+    # verifies for the http transport — this is what survives multi-instance
+    # (a per-process UUID store was the original -32006 cause).
+    session_engine = next(
+        e for e in guard._engines if isinstance(e, SessionEngine)
+    )
+    session_engine.signer.verify(session_ids[0], "http")
 
 
 async def test_regression_websocket_scope_not_forwarded_unguarded() -> None:

@@ -47,6 +47,20 @@ class CoSAIGuard:
     def __init__(self, engines: list[ProtectionEngine]) -> None:
         self._engines = engines
 
+    def mint_session_id(self, transport: str) -> str:
+        """Mint the session_id for a brand-new session.
+
+        Delegates to the SessionEngine's stateless HMAC signer when T7 is
+        enabled, so the ID is a self-verifying token that survives horizontal
+        scaling and instance recycling. Falls back to a CSPRNG UUID only when
+        no SessionEngine is configured (T7 disabled) — in that mode there is no
+        session verification anyway.
+        """
+        for engine in self._engines:
+            if isinstance(engine, SessionEngine):
+                return engine.signer.mint(transport)
+        return str(uuid.uuid4())
+
     # -------------------------------------------------------------------------
     # Factory — typed config
     # -------------------------------------------------------------------------
@@ -303,7 +317,10 @@ class CoSAIGuard:
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 from types import MappingProxyType
                 from .exceptions import AuthorizationError
-                session_id = str(uuid.uuid4())
+                # Must be a signature-verifiable token: when T7 is enabled,
+                # SessionEngine.on_request verifies this — a raw UUID would
+                # always raise SessionError and break every decorated tool.
+                session_id = self.mint_session_id("stdio")
                 ctx = CoSAIContext.new(session_id, transport="stdio")
                 req = MCPRequest(
                     method="tools/call",
