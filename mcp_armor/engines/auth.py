@@ -17,6 +17,19 @@ from ..types import MCPRequest, MCPResponse
 _DPOP_ALLOWED_ALGS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
                                   "ES256", "ES384", "ES512", "EdDSA"})
 
+# F8 fix: explicit algorithm allowlist for access-token verification. Never
+# rely on the JWT library's default — pin it so a downgraded/regressed
+# joserfc cannot accept `alg:none`. `none` (and any unlisted alg) is rejected
+# by joserfc when an explicit allowlist is passed. HS/RS confusion is
+# additionally prevented by joserfc binding alg to key type, but pinning the
+# list closes the library-default gap. HS* is included because operators may
+# legitimately configure a symmetric `oct` JWKS; it is NEVER accepted against
+# an RSA/EC public key (joserfc key-type binding enforces that).
+_ACCESS_TOKEN_ALGS: list[str] = sorted(_DPOP_ALLOWED_ALGS | {
+    "HS256", "HS384", "HS512",
+})
+_DPOP_ALGS_LIST: list[str] = sorted(_DPOP_ALLOWED_ALGS)
+
 # Minimum RSA modulus bits (NIST SP 800-131A)
 _MIN_RSA_BITS = 2048
 
@@ -166,6 +179,7 @@ class AuthEngine:
     def __init__(
         self,
         require_dpop: bool = True,
+        require_jti: bool = True,
         jti_cache_size: int = 10_000,
         token_expiry_max_secs: int = 3600,
         jwks: dict | None = None,
@@ -176,6 +190,7 @@ class AuthEngine:
         endpoint_uri: str | None = None,
     ) -> None:
         self._require_dpop = require_dpop
+        self._require_jti = require_jti
         self._token_expiry_max_secs = token_expiry_max_secs
         self._issuer = issuer
         self._audience = audience
@@ -206,10 +221,14 @@ class AuthEngine:
 
         try:
             from joserfc import jwt  # type: ignore[import]
-            obj = jwt.decode(token, self._key_set)
+            # F8 fix: pin the algorithm allowlist explicitly — do not trust
+            # the library default.
+            obj = jwt.decode(token, self._key_set, algorithms=_ACCESS_TOKEN_ALGS)
             claims: dict = obj.claims
+        except AuthenticationError:
+            raise
         except Exception as exc:
-            raise AuthenticationError(f"JWT verification failed") from exc
+            raise AuthenticationError("JWT verification failed") from exc
 
         now = time.time()
 
@@ -246,7 +265,18 @@ class AuthEngine:
                 raise AuthenticationError("JWT audience mismatch")
 
         jti = claims.get("jti")
-        if jti is not None:
+        if jti is None:
+            # F5 fix: a token without jti cannot be replay-tracked. Fail
+            # closed by default (mirrors the DPoP path which already raises
+            # on missing jti). Operators that deliberately accept jti-less
+            # tokens must opt out via require_jti=False.
+            if self._require_jti:
+                raise AuthenticationError(
+                    "JWT missing jti claim — replay protection requires a unique "
+                    "token identifier (T1-002). Set require_jti=False only if the "
+                    "issuer cannot mint jti and replay risk is accepted."
+                )
+        else:
             if not self._jti_cache.check_and_add(jti, float(exp)):
                 raise AuthenticationError("JWT JTI replayed — token replay attack detected")
 
@@ -294,7 +324,10 @@ class AuthEngine:
         try:
             proof_key = _import_jwk(jwk_data)
             from joserfc import jwt  # type: ignore[import]
-            obj = jwt.decode(proof, proof_key)
+            # F8 fix: pin to the asymmetric DPoP algorithm allowlist (already
+            # validated against the header above; pinning here closes the
+            # library-default gap if joserfc ever regresses).
+            obj = jwt.decode(proof, proof_key, algorithms=_DPOP_ALGS_LIST)
             claims = obj.claims
         except AuthenticationError:
             raise

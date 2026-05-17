@@ -6,7 +6,14 @@ from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import InjectionDetectedError
-from ..types import Finding, MCPRequest, MCPResponse, Severity, ThreatCategory
+from ..types import (
+    Finding,
+    MCPRequest,
+    MCPResponse,
+    Severity,
+    ThreatCategory,
+    scannable_strings,
+)
 
 # Truncate strings to this length before regex scanning to bound worst-case time
 # when re2 is unavailable. Injection phrases are short; this doesn't create a
@@ -120,13 +127,17 @@ class BoundaryEngine:
         return ctx
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
-        if req.method != "tools/call":
+        # F2 fix: scan every content-bearing method. prompts/get.arguments and
+        # resources/read.uri are attacker-influenced text fed to the LLM exactly
+        # like tools/call arguments — previously skipped entirely.
+        fields = scannable_strings(req)
+        if not fields:
             return ctx
 
-        # Always scan the tool name field — defense-in-depth against injection
-        # embedded in the tool name string (SupplyChainEngine is the primary gate,
-        # but boundary scanning is consistent across all string params).
-        tool_name = req.params.get("name", "")
+        # Always scan the tool/resource name field — defense-in-depth against
+        # injection embedded in the name string (SupplyChainEngine is the
+        # primary gate, but boundary scanning is consistent across all params).
+        tool_name = fields.get("name", "")
         if isinstance(tool_name, str) and tool_name:
             matched = self._scan(tool_name)
             if matched:
@@ -135,8 +146,18 @@ class BoundaryEngine:
                     f"(pattern: {matched!r}) (T4-001)"
                 )
 
-        if self._scan_call_args:
-            args = req.params.get("arguments", {})
+        # Scan the resources/* uri the same way (F2).
+        uri = fields.get("uri")
+        if isinstance(uri, str) and uri:
+            matched = self._scan(uri)
+            if matched:
+                raise InjectionDetectedError(
+                    f"Prompt injection pattern detected in resource uri "
+                    f"(pattern: {matched!r}) (T4-001)"
+                )
+
+        if self._scan_call_args and "arguments" in fields:
+            args = fields["arguments"]
             # Recursive scan of all string values — never log the matched value
             matched = self._scan_values(args)
             if matched:
@@ -183,8 +204,11 @@ class BoundaryEngine:
                             finding=finding,
                         )
 
-        if resp.raw_body:
-            matched = self._scan(resp.raw_body)
+        # F1 fix: scan the raw, pre-escape, entity-decoded body. Scanning
+        # resp.raw_body (HTML-escaped) made the <|im_start|> / <!-- --> /
+        # angle-bracket signatures structurally unmatchable on tool responses.
+        if resp.scan_body:
+            matched = self._scan(resp.scan_body)
             if matched:
                 finding = Finding(
                     threat=ThreatCategory.T4,

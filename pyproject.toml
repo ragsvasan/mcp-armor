@@ -22,7 +22,7 @@ classifiers = [
 
 dependencies = [
     "google-re2>=1.1",
-    "joserfc>=0.12",
+    "joserfc>=1.0",  # F8: floor at a release with hardened alg-confusion / alg:none defaults
     "keyring>=24.0",
     "pyyaml>=6.0",
     "jsonschema>=4.20",

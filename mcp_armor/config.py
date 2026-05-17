@@ -24,12 +24,13 @@ _KNOWN_TOP_LEVEL = frozenset({"version", "threats"})
 _KNOWN_THREAT_KEYS = frozenset({f"T{i}" for i in range(1, 13)})
 
 _KNOWN_T1 = frozenset({
-    "enabled", "require_dpop", "jti_cache_size", "token_expiry_max_secs",
-    "jwks", "issuer", "audience", "endpoint_uri", "dpop_max_age_secs",
-    "dpop_future_skew_secs",
+    "enabled", "require_dpop", "require_jti", "jti_cache_size",
+    "token_expiry_max_secs", "jwks", "issuer", "audience", "endpoint_uri",
+    "dpop_max_age_secs", "dpop_future_skew_secs",
 })
 _KNOWN_T2 = frozenset({
     "enabled", "default_policy", "tool_policies", "destructive_token_ttl_seconds",
+    "echo_confirm_token",
 })
 _KNOWN_T3 = frozenset({"enabled", "max_payload_bytes", "strict_schema"})
 _KNOWN_T4 = frozenset({"enabled", "scan_definitions", "scan_responses", "scan_call_args"})
@@ -107,6 +108,9 @@ class ToolPolicy:
 @dataclass(frozen=True)
 class T1Config:
     require_dpop: bool = True
+    # F5 fix: fail closed by default — an access token without a jti claim
+    # cannot be replay-tracked, so it is rejected (mirrors the DPoP path).
+    require_jti: bool = True
     jti_cache_size: int = 10_000
     token_expiry_max_secs: int = 3600
     jwks: dict[str, Any] | None = None
@@ -122,6 +126,10 @@ class T2Config:
     tool_policies: dict[str, ToolPolicy]
     default_deny: bool = True
     destructive_token_ttl_seconds: int = 60
+    # F9: do not echo the destructive-confirmation token to the client by
+    # default (an autonomous agent would auto-resubmit it). Opt in only for
+    # interactive human clients.
+    echo_confirm_token: bool = False
 
 
 @dataclass(frozen=True)
@@ -243,6 +251,7 @@ def load_config(path: str | Path) -> ArmorConfig:
     t1_raw = _t("T1")
     t1 = T1Config(
         require_dpop=t1_raw.get("require_dpop", True),
+        require_jti=t1_raw.get("require_jti", True),
         jti_cache_size=int(t1_raw.get("jti_cache_size", 10_000)),
         token_expiry_max_secs=int(t1_raw.get("token_expiry_max_secs", 3600)),
         jwks=t1_raw.get("jwks"),
@@ -265,6 +274,7 @@ def load_config(path: str | Path) -> ArmorConfig:
             tool_policies=policies,
             default_deny=t2_raw.get("default_policy", "deny") == "deny",
             destructive_token_ttl_seconds=int(t2_raw.get("destructive_token_ttl_seconds", 60)),
+            echo_confirm_token=bool(t2_raw.get("echo_confirm_token", False)),
         )
 
     # T3

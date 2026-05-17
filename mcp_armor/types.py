@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -41,6 +42,48 @@ class Finding:
     remediation: str
 
 
+# F2 fix: request-phase engines previously gated on `method == "tools/call"`
+# only, leaving resources/read, resources/subscribe and prompts/get — all
+# first-class MCP methods that resolve URIs / templated content — entirely
+# unauthorized, unvalidated and SSRF-unchecked. These methods carry attacker-
+# influenced content that must run the same scanning chain as tools/call.
+CONTENT_BEARING_METHODS: frozenset[str] = frozenset({
+    "tools/call",
+    "resources/read",
+    "resources/subscribe",
+    "prompts/get",
+})
+
+
+def scannable_strings(req: "MCPRequest") -> dict[str, Any]:
+    """
+    Return the attacker-influenced fields of a content-bearing request that
+    must be scanned by validation/boundary/SSRF engines.
+
+    Normalises the per-method parameter shape so every engine scans the same
+    surface regardless of method:
+      - tools/call:          {name, arguments}
+      - resources/read:      {uri}
+      - resources/subscribe: {uri}
+      - prompts/get:         {name, arguments}
+    Unknown / non-content methods return {} (engines early-return).
+    """
+    if req.method not in CONTENT_BEARING_METHODS:
+        return {}
+    p = req.params
+    out: dict[str, Any] = {}
+    name = p.get("name")
+    if isinstance(name, str) and name:
+        out["name"] = name
+    args = p.get("arguments")
+    if args is not None:
+        out["arguments"] = args
+    uri = p.get("uri")
+    if uri is not None:
+        out["uri"] = uri
+    return out
+
+
 @dataclass(frozen=True)
 class MCPRequest:
     method: str                              # e.g. "tools/call"
@@ -73,19 +116,73 @@ class MCPRequest:
         )
 
 
+def normalize_for_scan(text: str) -> str:
+    """
+    Decode HTML entities then NFKC-normalize so injection/PII detectors see the
+    text the LLM will effectively see, not an escaped/encoded representation.
+
+    Defends both directions of the F1 bypass class:
+    - payloads whose signature chars (``<`` ``>`` ``&``) were HTML-escaped
+      somewhere upstream (the original detection-bypass);
+    - payloads that arrive deliberately entity-encoded (``&lt;|im_start|&gt;``)
+      to slip past literal-character regexes (the inverse bypass).
+    """
+    # html.unescape handles named and numeric entities, including the
+    # double-escaped forms produced by escaping already-escaped text.
+    prev = text
+    for _ in range(3):  # bounded fixpoint — collapse double/triple encoding
+        nxt = html.unescape(prev)
+        if nxt == prev:
+            break
+        prev = nxt
+    return unicodedata.normalize("NFKC", prev)
+
+
 @dataclass(frozen=True)
 class MCPResponse:
     result: MappingProxyType[str, Any] | None
     error: MappingProxyType[str, Any] | None
-    raw_body: str              # HTML-escaped at ingestion
+    raw_body: str              # HTML-escaped — safe for downstream rendering
+    # Raw, pre-escape, entity-decoded text the detectors MUST scan (F1 fix).
+    # Optional in the constructor: when omitted it is derived from raw_body by
+    # entity-decoding, so legacy callers and tests that pass an already-raw
+    # raw_body still get correct detection. The canonical builders
+    # (from_dict / from_text) populate it explicitly from the pre-escape source.
+    scan_body: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.scan_body and self.raw_body:
+            # Derive a scannable view: decode any HTML entities present in
+            # raw_body (covers the F1 escape) and NFKC-normalize. Fail-safe:
+            # if raw_body was never escaped this is an identity transform.
+            object.__setattr__(
+                self, "scan_body", normalize_for_scan(self.raw_body)
+            )
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "MCPResponse":
-        raw = str(d)
+        raw = str(d)[:65536]
         return cls(
             result=MappingProxyType(d["result"]) if "result" in d else None,
             error=MappingProxyType(d["error"]) if "error" in d else None,
-            raw_body=html.escape(raw[:65536], quote=True),  # cap + escape at ingestion
+            raw_body=html.escape(raw, quote=True),     # cap + escape for rendering
+            scan_body=normalize_for_scan(raw),         # what detectors must see (F1)
+        )
+
+    @classmethod
+    def from_text(cls, text: str) -> "MCPResponse":
+        """Build a response from a raw text payload (decorator / per-tool path).
+
+        Keeps an unescaped, entity-decoded copy for detection so the F1
+        HTML-escape bypass cannot recur on the @guard.protect()/FastMCP
+        decorator paths either.
+        """
+        raw = text[:65536]
+        return cls(
+            result=None,
+            error=None,
+            raw_body=html.escape(raw, quote=True),
+            scan_body=normalize_for_scan(raw),
         )
 
 

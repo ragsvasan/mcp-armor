@@ -256,7 +256,31 @@ class ArmorMiddleware:
                                   "Missing Mcp-Session-Id header")
                 return
 
-        ctx = CoSAIContext.new(session_id, transport="http")
+        # F4 / F7 fix: an MCP session spans many HTTP requests. Recreating a
+        # fresh CoSAIContext.new() per request reset tool_manifest_hash (so
+        # rug-pull / T6-001 drift never fired), the call/wall-clock budget
+        # (so T10-001/002 per-session limits were unbounded), and accumulated
+        # findings / audit_parent continuity. We now load the persisted,
+        # evolving context for an existing session and only create a new one
+        # at `initialize`.
+        if is_new_session:
+            ctx = CoSAIContext.new(session_id, transport="http")
+        else:
+            stored = self._active_sessions.get(session_id)
+            if stored is not None:
+                ctx = stored
+            else:
+                # No persisted context for this session id (e.g. a different
+                # worker opened it, or it was evicted). NOTE: this is NOT
+                # "fail closed" — creating a fresh CoSAIContext.new() resets
+                # the budget/manifest baseline, which is exactly the original
+                # F4/F7 hole for any session this worker did not open. It is
+                # accepted ONLY within the honestly-disclosed single-worker
+                # scope: _active_sessions is in-process, so multi-worker
+                # deployments still require a shared session store to close
+                # this path (documented in the F4/F7 residual risk). Treat
+                # this branch as a known fail-open limitation, not a guard.
+                ctx = CoSAIContext.new(session_id, transport="http")
         set_context(ctx)
 
         # FIX-6: catch all exceptions — unexpected errors must not leak tracebacks
@@ -276,6 +300,12 @@ class ArmorMiddleware:
             )
             ctx = await self._guard._run_request(ctx, req)
             set_context(ctx)
+            # F4 / F7 fix: persist the evolving context (incremented budget,
+            # manifest hash, findings) so the NEXT request in this session
+            # sees it. Only track sessions we actually opened — an unknown
+            # session id is rejected by SessionEngine before reaching here.
+            if session_id in self._active_sessions:
+                self._active_sessions[session_id] = ctx
 
         except CoSAIException as exc:
             # FIX-5: log full detail internally; send opaque message to client.
@@ -339,6 +369,11 @@ class ArmorMiddleware:
         resp = MCPResponse.from_dict(resp_dict)
         try:
             ctx = await self._guard._run_response(ctx, resp)
+            # F4 fix: persist the post-response context so the tools/list
+            # manifest hash snapshot survives into the next request — that
+            # is what makes mid-session rug-pull (T6-001) detectable.
+            if session_id in self._active_sessions:
+                self._active_sessions[session_id] = ctx
         except CoSAIException as exc:
             log.warning("Guard response violation [%s]: %s", exc.__class__.__name__, exc)
             client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Response rejected")

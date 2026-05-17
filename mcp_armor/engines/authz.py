@@ -10,7 +10,65 @@ from typing import TYPE_CHECKING
 
 from ..context import CoSAIContext
 from ..exceptions import AuthorizationError
-from ..types import MCPRequest, MCPResponse
+from ..types import CONTENT_BEARING_METHODS, MCPRequest, MCPResponse
+
+# MCP control-plane methods that carry no tool/resource invocation and are safe
+# to pass through authz (handshake / capability discovery / notifications).
+# Anything NOT in this set and NOT a content-bearing method is default-denied
+# (fail closed) so a novel or attacker-chosen method name cannot skip the
+# authz gate (F2).
+#
+# Source: the standard methods of the Model Context Protocol specification
+# (schema revision 2025-06-18, https://modelcontextprotocol.io/specification/
+# 2025-06-18 — `methods` enumerated across the client, server and shared
+# schemas). Content-bearing invocations (tools/call, resources/read,
+# resources/subscribe, prompts/get) are deliberately NOT listed here — they
+# go through full RBAC via CONTENT_BEARING_METHODS. Everything else in the
+# spec is a handshake / discovery / lifecycle / notification frame that
+# carries no tool or resource invocation and is safe to pass through.
+#
+# BLOCK[2] fix: the prior list omitted resources/unsubscribe (the documented
+# pair of resources/subscribe, which IS a content-bearing method),
+# roots/list, sampling/createMessage, elicitation/create, and the
+# notifications/* control frames (cancelled, progress, message,
+# roots/list_changed). Under the default `default_deny=True` these were
+# hard-denied with -32002, silently breaking any deployed MCP server that
+# uses subscriptions, progress, cancellation, sampling, elicitation or
+# roots. Adding a new standard MCP method in a future protocol revision
+# requires extending this set (or CONTENT_BEARING_METHODS for invocations).
+_AUTHZ_PASSTHROUGH_METHODS: frozenset[str] = frozenset({
+    # Lifecycle / handshake
+    "initialize",
+    "notifications/initialized",
+    "ping",
+    # Capability discovery (read-only listings)
+    "tools/list",
+    "resources/list",
+    "resources/templates/list",
+    "prompts/list",
+    "completion/complete",
+    "logging/setLevel",
+    # Resource subscription teardown — paired with resources/subscribe
+    # (which is a CONTENT_BEARING_METHOD). Unsubscribe carries no resource
+    # content, only a uri reference to stop notifications for.
+    "resources/unsubscribe",
+    # Roots (client-exposed filesystem roots) — listing + change notify
+    "roots/list",
+    "notifications/roots/list_changed",
+    # Server-initiated sampling / elicitation requests (LLM/user round-trips,
+    # not tool/resource invocations on this server)
+    "sampling/createMessage",
+    "elicitation/create",
+    # Control / progress / log notification frames
+    "notifications/cancelled",
+    "notifications/progress",
+    "notifications/message",
+    # Server-initiated list-changed notifications
+    "notifications/resources/list_changed",
+    "notifications/resources/updated",
+    "notifications/tools/list_changed",
+    "notifications/prompts/list_changed",
+})
 
 if TYPE_CHECKING:
     from ..config import ToolPolicy
@@ -121,9 +179,18 @@ class AuthzEngine:
         tool_policies: dict[str, "ToolPolicy"] | None = None,
         default_deny: bool = True,
         destructive_token_ttl_seconds: int = 60,
+        echo_confirm_token: bool = False,
     ) -> None:
         self._policies: dict[str, ToolPolicy] = tool_policies or {}  # type: ignore[assignment]
         self._default_deny = default_deny
+        # F9 fix: by default the destructive-confirmation token is NOT echoed
+        # back in the client-facing error. Returning it to the same automated
+        # channel lets an unattended LLM agent parse and auto-resubmit it,
+        # which fully defeats the two-stage human-in-the-loop gate. With this
+        # off, the token is logged server-side (WARNING) for an out-of-band
+        # operator/step-up flow. Set echo_confirm_token=True only for
+        # interactive/human clients where auto-resubmit is not a concern.
+        self._echo_confirm_token = echo_confirm_token
         self._token_store = _TokenStore(destructive_token_ttl_seconds)
         log.warning(
             "AuthzEngine: destructive token store is in-process (single-worker only). "
@@ -137,10 +204,23 @@ class AuthzEngine:
         return ctx
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
-        if req.method != "tools/call":
+        # F2 fix: apply RBAC to every content-bearing method, not just
+        # tools/call. resources/read & prompts/get reach the upstream server
+        # and resolve URIs / templates — they must be authorized too.
+        if req.method not in CONTENT_BEARING_METHODS:
+            if req.method in _AUTHZ_PASSTHROUGH_METHODS:
+                return ctx
+            # Fail closed: an unknown method must not bypass the authz gate.
+            if self._default_deny:
+                raise AuthorizationError(
+                    f"Method '{req.method}' is not a recognised MCP method — "
+                    "denied (default-deny, T2-001)"
+                )
             return ctx
 
-        tool_name = str(req.params.get("name", ""))
+        # Resource subject: tools/call & prompts/get use 'name'; resources/*
+        # are keyed by their 'uri'. Policies may be registered under either.
+        tool_name = str(req.params.get("name", "") or req.params.get("uri", ""))
         policy = self._policies.get(tool_name)
 
         # Default deny — tool has no policy entry
@@ -195,10 +275,26 @@ class AuthzEngine:
             )
             if not confirm_token:
                 token = self._token_store.issue(ctx.session_id, tool_name)
+                if self._echo_confirm_token:
+                    raise AuthorizationError(
+                        f"Tool '{tool_name}' is destructive and requires explicit "
+                        f"confirmation. Re-submit with '_confirm_token': '{token}' "
+                        f"in the arguments (T2-004). Token is bound to this tool "
+                        f"and session only."
+                    )
+                # F9 fix: deliver the token out-of-band only. The client error
+                # carries NO token, so an autonomous agent cannot auto-confirm.
+                log.warning(
+                    "Destructive tool %r confirmation token issued for session "
+                    "%s (out-of-band delivery; not echoed to client): %s",
+                    tool_name, ctx.session_id, token,
+                )
                 raise AuthorizationError(
-                    f"Tool '{tool_name}' is destructive and requires explicit confirmation. "
-                    f"Re-submit with '_confirm_token': '{token}' in the arguments (T2-004). "
-                    f"Token is bound to this tool and session only."
+                    f"Tool '{tool_name}' is destructive and requires explicit "
+                    f"out-of-band confirmation (T2-004). A confirmation token has "
+                    f"been issued to the operator channel; resubmit with the "
+                    f"'_confirm_token' obtained out-of-band. The token is NOT "
+                    f"returned in this response by design."
                 )
             if not self._token_store.consume(ctx.session_id, tool_name, str(confirm_token)):
                 raise AuthorizationError(

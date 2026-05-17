@@ -57,10 +57,13 @@ class ProtectionEngine:
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
-        if not resp.raw_body:
+        # F1 fix: scan the raw, pre-escape, entity-decoded body. HTML-escaping
+        # at ingestion mangles characters PII regexes depend on (e.g. & in
+        # api_key=...&, quotes around secrets), creating detection gaps.
+        if not resp.scan_body:
             return ctx
         for pii_type, pattern in self._patterns.items():
-            if pattern.search(resp.raw_body):
+            if pattern.search(resp.scan_body):
                 raise PIILeakError(
                     f"PII type '{pii_type}' detected in tool response — blocked"
                 )

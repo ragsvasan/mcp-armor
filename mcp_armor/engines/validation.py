@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from ..context import CoSAIContext
 from ..exceptions import ValidationError
-from ..types import MCPRequest, MCPResponse
+from ..types import (
+    CONTENT_BEARING_METHODS,
+    MCPRequest,
+    MCPResponse,
+    scannable_strings,
+)
 
 _MAX_PAYLOAD_BYTES = 65_536
 
@@ -140,10 +145,27 @@ class ValidationEngine:
         return ctx
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
-        if req.method != "tools/call":
+        # F2 fix: validate every content-bearing method (tools/call,
+        # resources/read, resources/subscribe, prompts/get) — not just
+        # tools/call. resources/read.uri = file:///etc/passwd was previously
+        # unscanned for path traversal / injection.
+        #
+        # BLOCK[1] fix: the T3-001 size-limit and the tools/call strict-schema
+        # / unknown-tool gate MUST run for ANY content-bearing method,
+        # independent of whether `scannable_strings` extracted any fields. A
+        # `tools/call` with empty/abnormal params (no name, no arguments, no
+        # uri) yields `{}` here; gating these checks on a non-empty `fields`
+        # let an attacker bypass the payload-size DoS guard and the schema
+        # enforcement simply by omitting the standard param keys. The
+        # field-extraction result only governs the per-field injection scans
+        # below, never the size/schema gates.
+        is_content_method = req.method in CONTENT_BEARING_METHODS
+        fields = scannable_strings(req)
+        if not is_content_method and not fields:
             return ctx
 
-        # T3-001: size limit
+        # T3-001: size limit — runs for every content-bearing method even when
+        # no scannable field was extracted (empty/abnormal params).
         raw = str(req.params)
         if len(raw.encode()) > self._max_payload_bytes:
             raise ValidationError(
@@ -160,12 +182,22 @@ class ValidationEngine:
                 f"got {type(arguments).__name__}"
             )
 
-        # Recursively scan all string values including nested lists/dicts
+        # Recursively scan all string values including nested lists/dicts.
+        # Covers arguments AND the resources/* `uri` field (F2).
         if arguments is not None:
             self._scan_all_strings(arguments, "arguments")
+        uri = fields.get("uri")
+        if uri is not None:
+            if not isinstance(uri, str):
+                raise ValidationError(
+                    f"{req.method!r}: 'uri' must be a string, got {type(uri).__name__}"
+                )
+            self._scan_injection(uri, "uri")
 
-        # T3-005: JSON schema validation — fail closed when strict_schema=True
-        if self._strict_schema:
+        # T3-005: JSON schema validation — only applies to tool calls; other
+        # content methods have no registered input schema. Fail closed on
+        # tools/call as before.
+        if self._strict_schema and req.method == "tools/call":
             if tool_name not in self._tool_schemas:
                 raise ValidationError(
                     f"Tool {tool_name!r} has no registered schema — "

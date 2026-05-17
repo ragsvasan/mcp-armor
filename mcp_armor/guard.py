@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import html
 import logging
 import uuid
 from pathlib import Path
@@ -86,6 +85,7 @@ class CoSAIGuard:
         if cfg.t1 is not None:
             engines.append(AuthEngine(
                 require_dpop=cfg.t1.require_dpop,
+                require_jti=cfg.t1.require_jti,
                 jti_cache_size=cfg.t1.jti_cache_size,
                 token_expiry_max_secs=cfg.t1.token_expiry_max_secs,
                 jwks=cfg.t1.jwks,
@@ -121,6 +121,7 @@ class CoSAIGuard:
                 tool_policies=cfg.t2.tool_policies,
                 default_deny=cfg.t2.default_deny,
                 destructive_token_ttl_seconds=cfg.t2.destructive_token_ttl_seconds,
+                echo_confirm_token=cfg.t2.echo_confirm_token,
             ))
 
         if cfg.t3 is not None:
@@ -339,8 +340,10 @@ class CoSAIGuard:
                         f"Tool {fn.__name__!r} requires scope {required_scope!r}"
                     )
                 result = await fn(*args, **kwargs)
-                escaped = html.escape(str(result)[:65536], quote=True)
-                resp = MCPResponse(result=None, error=None, raw_body=escaped)
+                # F1 fix: keep an unescaped, entity-decoded copy for detection.
+                # Escaping before scanning neutralised the engine's own
+                # angle-bracket injection signatures on this path too.
+                resp = MCPResponse.from_text(str(result))
                 for engine in reversed(active):
                     ctx = await engine.on_response(ctx, resp)
                     set_context(ctx)

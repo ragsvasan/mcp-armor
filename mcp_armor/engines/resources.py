@@ -7,7 +7,7 @@ from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import ResourceExceededError
-from ..types import MCPRequest, MCPResponse
+from ..types import CONTENT_BEARING_METHODS, MCPRequest, MCPResponse
 
 
 def _json_depth(obj: Any, current: int = 0) -> int:
@@ -55,7 +55,10 @@ class ResourceEngine:
         return ctx
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
-        if req.method != "tools/call":
+        # F2 fix: count resources/read & prompts/get against the session
+        # budget too — otherwise the denial-of-wallet limit only ever sees
+        # the single tools/call per request.
+        if req.method not in CONTENT_BEARING_METHODS:
             return ctx
 
         budget = ctx.budget

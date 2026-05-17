@@ -19,11 +19,12 @@ def _policy(**kwargs) -> ToolPolicy:
     return ToolPolicy(**defaults)
 
 
-def _engine(policies=None, default_deny=True, ttl=60) -> AuthzEngine:
+def _engine(policies=None, default_deny=True, ttl=60, echo_confirm_token=False) -> AuthzEngine:
     return AuthzEngine(
         tool_policies=policies or {},
         default_deny=default_deny,
         destructive_token_ttl_seconds=ttl,
+        echo_confirm_token=echo_confirm_token,
     )
 
 
@@ -173,7 +174,9 @@ async def test_destructive_tool_token_issued_in_error() -> None:
 
 
 async def test_destructive_tool_valid_token_passes() -> None:
-    eng = _engine(policies={"nuke": _policy(destructive=True)})
+    # echo_confirm_token=True: interactive-client mode where the token is
+    # returned in the error for a human to re-submit (F9 opt-in).
+    eng = _engine(policies={"nuke": _policy(destructive=True)}, echo_confirm_token=True)
     ctx = _ctx_with_user()
 
     # First call — get the token from the error
@@ -211,7 +214,7 @@ async def test_destructive_tool_wrong_token_denied() -> None:
 
 
 async def test_destructive_token_single_use() -> None:
-    eng = _engine(policies={"nuke": _policy(destructive=True)})
+    eng = _engine(policies={"nuke": _policy(destructive=True)}, echo_confirm_token=True)
     ctx = _ctx_with_user()
 
     req1 = make_request(params={"name": "nuke", "arguments": {}})
@@ -302,7 +305,7 @@ async def test_regression_confirm_token_not_transferable_across_tools() -> None:
     eng = _engine(policies={
         "nuke_a": _policy(destructive=True),
         "nuke_b": _policy(destructive=True),
-    })
+    }, echo_confirm_token=True)
     ctx = _ctx_with_user()
     import re
 

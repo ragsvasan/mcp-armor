@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -138,10 +137,11 @@ class _GuardedToolDispatcher:
 
                 result = await fn(*args, **kwargs)
 
-                # FIX-5: apply html.escape at ingestion — same path as MCPResponse.from_dict()
-                # Prevents dual-encoding bypass against TrustEngine/PIIEngine string patterns.
-                escaped_body = html.escape(str(result)[:65536], quote=True)
-                resp = MCPResponse(result=None, error=None, raw_body=escaped_body)
+                # F1 fix: MCPResponse.from_text keeps both an HTML-escaped
+                # raw_body (safe for rendering) AND a raw, entity-decoded
+                # scan_body that the detectors scan — escaping before scanning
+                # neutralised the engine's own angle-bracket signatures.
+                resp = MCPResponse.from_text(str(result))
                 await self._guard._run_response(ctx, resp)
 
                 return result
