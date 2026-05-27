@@ -1,0 +1,19 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks secret scan
+        args: [--no-banner, --redact]
+        stages: [pre-commit, pre-push]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        name: ruff lint
+        args: [--fix]
+        stages: [pre-commit]
+      - id: ruff-format
+        name: ruff format
+        stages: [pre-commit]
