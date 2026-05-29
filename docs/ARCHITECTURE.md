@@ -244,22 +244,107 @@ Pattern validation: all patterns are compiled at engine construction time. A pat
 
 ---
 
+## AuditEngine — Concurrent-Safe Async Writes
+
+As of v0.2.0, all file I/O in `AuditEngine` is dispatched via `asyncio.to_thread`.
+The event loop is never blocked by disk operations. An `asyncio.Lock` wraps the
+seq-number assignment and the corresponding `to_thread` dispatch as a single atomic
+unit, ensuring that no two coroutines can interleave their in-memory state with
+another's I/O:
+
+```
+async with self._async_lock:
+    entry_id, record, new_seq, chain_hash = self._write(...)   # in-memory, under threading.Lock
+    await asyncio.to_thread(_sync_append_record, path, record) # off-thread I/O
+    await asyncio.to_thread(_sync_write_hwm, hwm_path, ...)    # off-thread HWM update
+```
+
+The `threading.Lock` inside `_write()` guards the in-process `_prev_hash` / `_seq` state
+for any sync callers (tests, startup). The `asyncio.Lock` is the async-caller gate.
+
+---
+
+## @guard.protect — ContextVar Propagation
+
+The `@guard.protect` decorator supports two execution paths:
+
+**ASGI / HTTP path:** `ArmorMiddleware` (and `_GuardedToolDispatcher` for FastMCP) sets
+`_active_ctx` ContextVar to the live `CoSAIContext` (with real JWT scopes, user_id,
+tenant_id) before calling the downstream handler. The `protect` wrapper reads `_active_ctx`
+and uses it directly, so per-tool policy sees the same authenticated context as the
+middleware chain.
+
+**stdio / test path:** When `_active_ctx` is `None` (no active ASGI request), the
+decorator mints a fresh session ID and constructs a blank `CoSAIContext`. This path
+is for direct stdio calls and tests.
+
+The ContextVar token is saved and reset in a `finally` block after the request — no
+bleed between concurrent requests on the same async task.
+
+---
+
+## ResourceEngine — Heartbeat Task Lifecycle
+
+`ResourceEngine.on_startup()` creates the background zombie-session reaper via
+`asyncio.get_running_loop().create_task()`. The task runs until `on_shutdown()` cancels it.
+
+**Startup:**
+```python
+self._reaper_task = asyncio.get_running_loop().create_task(
+    self._reaper_loop(), name="mcp-armor-resource-reaper"
+)
+```
+
+**Reaper loop:** wakes every `heartbeat_interval_secs`; evicts sessions with no activity
+in that window; calls `eviction_callback(session_id)` (wired by `ArmorMiddleware` to
+clean `_active_sessions`).
+
+**Shutdown:** `on_shutdown()` → `self._reaper_task.cancel()` → `await self._reaper_task`
+(swallows `CancelledError`).
+
+---
+
+## BoundaryEngine — Normalization Pipeline
+
+Before applying injection regex patterns, `BoundaryEngine._scan()` builds a normalized
+scan surface via `_normalize_for_injection_scan()`:
+
+1. HTML entity decode (3-pass bounded fixpoint)
+2. Strip Unicode bidi override / embedding / isolate characters (U+202A–U+202E, U+2066–U+2069)
+3. Strip zero-width characters (zero-width space, ZWNJ, ZWJ, soft hyphen, BOM)
+4. Remove intra-word hyphens (`ig-nore` → `ignore`)
+5. Collapse whitespace runs to single space
+6. NFKC normalization (Unicode lookalikes)
+
+The scan runs on three surfaces: the original text, the normalized text, and any
+Base64-decoded content (capped at 8 token matches and 512 decoded chars to prevent
+CPU DoS via crafted input). All surfaces are truncated to `_MAX_SCAN_LEN` (8,192 chars)
+before regex application.
+
+---
+
 ## Audit Log Format
 
 The T12 `AuditEngine` writes a hash-chained JSON Lines file:
 
 ```json
-{"ts": 1714176000.0, "entry_id": "uuid4", "parent_id": null, "session_id": "s1",
+{"ts": 1714176000.0, "seq": 0, "entry_id": "uuid4", "parent_id": null, "session_id": "s1",
  "user_id": "user@example.com", "tenant_id": null,
  "event": "session_start", "method": "", "params_digest": "",
- "prev_hash": "0000...0000", "chain_hash": "sha256:abcd..."}
+ "prev_hash": "0000...0000", "chain_hash": "sha256:abcd...",
+ "chain_hmac": "hmac-sha256:1234..."}
 
-{"ts": 1714176001.2, "entry_id": "uuid4", "parent_id": "prev-entry-id", "session_id": "s1",
+{"ts": 1714176001.2, "seq": 1, "entry_id": "uuid4", "parent_id": "prev-entry-id", "session_id": "s1",
  "event": "request", "method": "tools/call", "params_digest": "sha256:efgh...",
- "prev_hash": "sha256:abcd...", "chain_hash": "sha256:ijkl..."}
+ "prev_hash": "sha256:abcd...", "chain_hash": "sha256:ijkl...",
+ "chain_hmac": "hmac-sha256:5678..."}
 ```
 
+- `seq`: monotonic 0-based sequence number — gaps are detected by `_verify_chain()`
 - `params_digest`: SHA-256 of raw params — never raw values (no PII in logs)
 - `parent_id`: enables DAG reconstruction for concurrent/nested calls
-- `chain_hash = SHA-256(prev_hash + entry_id)` — tampering breaks the chain at the next entry
-- `verify_chain()` walks the file and raises `AuditChainError` at the first broken link
+- `chain_hash = SHA-256(canonical_JSON_of_auditable_fields)` — tampering breaks the chain
+- `chain_hmac` (optional): `HMAC-SHA256(ARMOR_AUDIT_HMAC_KEY, canonical_JSON)` — set when
+  `ARMOR_AUDIT_HMAC_KEY` is in the environment; prevents log-truncation-and-recalculation
+- `verify_chain()` walks the file and raises `AuditChainError` at the first broken link,
+  sequence gap, or HMAC mismatch

@@ -1,8 +1,8 @@
 # mcp-armor — Coverage Status
 
-**Version:** 0.1.0  
-**Date:** 2026-05-04  
-**Tests:** 450 passing · Coverage: 90%+
+**Version:** 0.2.0  
+**Date:** 2026-05-28  
+**Tests:** 563 passing · Coverage: 90%+
 
 All 12 CoSAI threat engines are fully implemented and tested. No stubs remain.
 
@@ -116,13 +116,68 @@ across separate HTTP round-trips. It works correctly within a single call chain.
 T6 checks (allowlist, typosquat, homoglyph, shadow) fire on every `tools/list` response.
 Fix planned; see [SECURITY.md](SECURITY.md#known-limitations) for the full write-up.
 
-**T10 — heartbeat not enforced.** The `heartbeat_interval_secs` config key is accepted
-and documented but the background monitor that marks sessions dead after a missed heartbeat
-is not yet implemented. Active sessions are still bounded by `max_wall_clock_secs`.
+**T10 — heartbeat reaper active as of v0.2.0.** The background zombie-session reaper is
+now started in `ResourceEngine.on_startup()`. Sessions with no activity for
+`heartbeat_interval_secs` are evicted and the `ArmorMiddleware` session map is cleaned
+via the `eviction_callback` hook. Active sessions remain bounded by `max_wall_clock_secs`
+in addition to the heartbeat.
 
 **TypeScript / non-Python servers.** mcp-armor is a Python library. For TypeScript or
 other language servers, use the HTTP sidecar proxy pattern described in
 [TYPESCRIPT.md](TYPESCRIPT.md).
+
+---
+
+## Hardening Changes (v0.2.0)
+
+The 19 fixes shipped in commit `9caf11c` hardened existing engines without changing their
+external API. All coverage matrix entries remain Done. What changed internally:
+
+### AuditEngine (T12)
+- File I/O dispatched via `asyncio.to_thread` — the event loop is never blocked.
+- `asyncio.Lock` wraps seq-assignment + disk write atomically, fixing a concurrent-write
+  race that could produce duplicate `prev_hash` values under load.
+- Optional HMAC signing: set `ARMOR_AUDIT_HMAC_KEY` (64-char hex / 32 bytes) to add an
+  unforgeable `chain_hmac` field to every record, closing the log-truncation-and-
+  recalculation gap in pure SHA-256 chaining.
+- `ARMOR_AUDIT_HMAC_KEY_PREV` supports zero-downtime key rotation: old records verified
+  with the previous key are accepted with a WARNING.
+- `.hmac_enabled` sticky marker file: once HMAC is written, startup rejects a missing
+  key rather than silently downgrading integrity protection.
+- HMAC key validated at `__init__` (not per-record); invalid hex raises `ConfigError` at
+  startup.
+
+### BoundaryEngine (T4)
+- Normalization pipeline added before pattern matching: whitespace collapse, zero-width
+  char stripping, bidi override char stripping, intra-word hyphen removal, NFKC, and
+  Base64 decode-and-rescan. Closes split-word / invisible-char / encoded bypasses.
+- Base64 loop capped at 8 token matches and 512 decoded chars per call — CPU DoS guard.
+
+### ResourceEngine (T10)
+- Background heartbeat reaper now actually starts: `on_startup()` creates the task via
+  `asyncio.get_running_loop().create_task()`. Previously the task was never launched and
+  the T10-004 limitation in Known Limitations applied; that limitation is now resolved.
+- Eviction callback wired to `ArmorMiddleware._active_sessions` so zombie session eviction
+  also cleans the middleware's own session map.
+
+### Guard / Context
+- `@guard.protect(threats=[...])`: `AuthEngine` (T1) and `AuthzEngine` (T2) force-included
+  regardless of the `threats=` filter — inadvertent auth bypass via `threats=["T3"]` is
+  now impossible.
+- `dry_run` mode: violations are logged at WARNING and audited as `"dry_run_violation"`
+  events; `AuthorizationError` / `AuthenticationError` always re-raise even in dry_run.
+  Activated via `CoSAIGuard(dry_run=True)` or `dry_run: true` in `cosai.yaml`.
+  `NOT FOR PRODUCTION`.
+- `@guard.protect` now reads `_active_ctx` ContextVar set by the ASGI adapter, so
+  decorated tools see the live CoSAIContext with real JWT scopes during HTTP requests.
+- ContextVar reset via token in `finally` block — no context bleed between requests.
+- `_GuardedToolDispatcher` sets `_active_ctx` — FastMCP adapter now propagates context
+  the same way as the ASGI adapter.
+
+### Config
+- `load_config()` emits a WARNING log immediately when `dry_run: true` is parsed.
+- `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()` throughout —
+  avoids the deprecated API and the wrong-loop bug in coroutine context.
 
 ---
 

@@ -78,6 +78,19 @@ CoSAI T1–T12 mapped to OWASP MCP Top 10, ISO 27001:2022, NIST AI RMF 2.0, and 
 - T4-002: Indirect prompt injection — injection in tool call response bodies (raw_body scan)
 - T4-003: Manifest description poisoning — injection in `description` fields of `tools/list` responses; detected at manifest registration time before any tool is invoked
 
+**Normalization pipeline (v0.2.0):** before applying the 24-pattern injection library,
+`BoundaryEngine._scan()` normalizes each scan surface through:
+1. HTML entity decode (3-pass bounded fixpoint)
+2. Unicode bidi override / embedding / isolate character stripping (U+202A–U+202E, U+2066–U+2069)
+3. Zero-width character stripping (ZWSP, ZWNJ, ZWJ, soft hyphen, BOM)
+4. Intra-word hyphen removal (`ig-nore` → `ignore`)
+5. Whitespace collapse
+6. NFKC normalization
+
+Additionally, any Base64-encoded tokens in the text are decoded and rescanned (capped at
+8 matches and 512 decoded chars per call to prevent CPU DoS). This closes split-word,
+invisible-character, and encoded-payload injection bypasses.
+
 **Why black-box cannot detect T4:** a scanner cannot observe what content flows into the LLM's reasoning context. Only middleware in the call path can see this.
 
 **ISO 27001 controls:** A.14.2.5, A.8.28  
@@ -172,6 +185,12 @@ CoSAI T1–T12 mapped to OWASP MCP Top 10, ISO 27001:2022, NIST AI RMF 2.0, and 
 - T10-003: Recursive tool call loop — tool A calls tool B which calls tool A
 - T10-004: Missing heartbeat — zombie session holds resources without progress
 
+**Heartbeat reaper (v0.2.0):** `ResourceEngine.on_startup()` now starts a background
+task via `asyncio.get_running_loop().create_task()` that wakes every
+`heartbeat_interval_secs` and evicts sessions with no activity. The eviction callback
+notifies `ArmorMiddleware` to clean its own session map. T10-004 is actively enforced;
+it is no longer a known limitation.
+
 **ISO 27001 controls:** A.12.1.3 (capacity management), A.17.2.1 (availability of information processing facilities)  
 **NIST AI RMF:** GV-OV.OA-3, MP-OV-3  
 **CWE:** CWE-400 (uncontrolled resource consumption), CWE-770 (allocation of resources without limits)
@@ -203,6 +222,21 @@ CoSAI T1–T12 mapped to OWASP MCP Top 10, ISO 27001:2022, NIST AI RMF 2.0, and 
 - T12-002: Log tampering — audit trail modified after the fact
 - T12-003: PII in logs — raw tool parameters stored (privacy violation)
 - T12-004: Missing DAG parent — concurrent calls cannot be ordered in the audit timeline
+
+**HMAC chain signing (v0.2.0):** set `ARMOR_AUDIT_HMAC_KEY` (64-char hex / 32 bytes) to
+add an unforgeable `chain_hmac` field (`HMAC-SHA256(key, canonical_JSON)`) to every
+record. Pure SHA-256 chaining detects field tampering but allows an attacker with write
+access to truncate the log and recalculate all hashes; HMAC makes this computationally
+infeasible without the key.
+
+**`.hmac_enabled` sticky marker:** once written with HMAC enabled, startup raises
+`AuditChainError` if `ARMOR_AUDIT_HMAC_KEY` is absent — silent downgrade is impossible.
+
+**`ARMOR_AUDIT_HMAC_KEY_PREV`:** retain the old key during zero-downtime rotation; old
+records verified against the previous key emit a WARNING log instead of failing.
+
+**Concurrent-safe writes:** `asyncio.Lock` + `asyncio.to_thread` ensure seq-assignment
+and disk write are atomic; no two coroutines can produce entries with the same `prev_hash`.
 
 **ISO 27001 controls:** A.12.4.1 (event logging), A.12.4.3 (administrator and operator logs)  
 **NIST AI RMF:** MG-MT-5 (monitoring), GV-OV.OA-5 (accountability)  

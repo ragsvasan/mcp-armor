@@ -3,6 +3,74 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-28
+
+Security hardening release closing 19 findings across AuditEngine, BoundaryEngine,
+ResourceEngine, guard, and config. 563 tests passing (up from 508).
+
+### Security
+
+- **AuditEngine: concurrent write race fixed** — `asyncio.Lock` wraps seq assignment
+  and the `asyncio.to_thread` disk write in a single atomic unit; no two coroutines
+  can produce entries with the same `prev_hash`.
+- **`dry_run` never suppresses auth errors** — `AuthorizationError` and
+  `AuthenticationError` always re-raise in both request and response chains even when
+  `dry_run=True`. Only non-auth violations are logged-and-continued.
+- **`@guard.protect(threats=[...])` forces auth engines** — `AuthEngine` (T1) and
+  `AuthzEngine` (T2) are force-included in the active engine list regardless of the
+  `threats=` filter, preventing inadvertent auth bypass via `threats=["T3"]`.
+- **BoundaryEngine Base64 loop capped at 8 tokens** — CPU DoS via crafted truncated
+  input prevented; `_BASE64_MAX_MATCHES = 8` and `_BASE64_MAX_DECODED_CHARS = 512`
+  budget the decode surface per call.
+- **`asyncio.get_event_loop()` replaced with `get_running_loop()`** — avoids the
+  deprecated 3.10+ API and the wrong-loop bug in coroutine context.
+- **HMAC key validated at startup** — `ARMOR_AUDIT_HMAC_KEY` is parsed to bytes at
+  `AuditEngine.__init__` (stored as `self._hmac_key`); invalid hex raises `ConfigError`
+  immediately rather than failing on every write.
+- **`ARMOR_AUDIT_HMAC_KEY_PREV` for zero-downtime key rotation** — old records signed
+  with the previous key are accepted with a WARNING log entry during the rotation
+  grace period; neither key version is silently lost.
+- **ContextVar reset via token in `finally`** — `_active_ctx` is always reset at the
+  end of an ASGI request regardless of exceptions, preventing context bleed between
+  requests on the same async task.
+- **Reaper eviction callback wired to `ArmorMiddleware._active_sessions`** — zombie
+  sessions evicted by `ResourceEngine._reaper_loop` are now also removed from the
+  middleware's own session store via the `eviction_callback` hook.
+- **`_GuardedToolDispatcher` sets `_active_ctx`** — FastMCP-wrapped tools now see the
+  live `CoSAIContext` (with real JWT scopes) via `_active_ctx` exactly as ASGI tools do.
+- **`.hmac_enabled` sticky marker prevents silent HMAC downgrade** — once a log has
+  been written with HMAC enabled, startup raises `AuditChainError` if `ARMOR_AUDIT_HMAC_KEY`
+  is absent, preventing an attacker from disabling HMAC by unsetting the env var.
+
+### Internal / Correctness
+
+- **AuditEngine file I/O moved off event loop** — all disk operations (`_sync_append_record`,
+  `_sync_write_hwm`) dispatched via `asyncio.to_thread`; the event loop is never blocked
+  by audit log writes.
+- **`@guard.protect` uses live ASGI `ContextVar`** — decorators executing inside an
+  active HTTP request read the context from `_active_ctx` ContextVar rather than
+  constructing a blank stdio context, ensuring per-tool policy sees real JWT scopes.
+- **ResourceEngine heartbeat reaper now starts** — `on_startup()` creates the background
+  reaper task via `asyncio.get_running_loop().create_task()`; previously the task was
+  silently never started.
+- **HMAC audit chain signing** — optional `ARMOR_AUDIT_HMAC_KEY` adds an unforgeable
+  `chain_hmac` field (HMAC-SHA256) to every audit record, closing the log-truncation-
+  and-recalculation gap present in pure SHA-256 chaining.
+- **`echo_confirm_token` paradox documented** — the inescapable tradeoff is documented
+  in `SECURITY.md`: `false` (default) breaks fully automated clients; `true` allows
+  autonomous agents to auto-resubmit. The gate is only meaningful when a human
+  intercepts the error before it reaches the agent.
+- **`dry_run` mode added** — `CoSAIGuard(dry_run=True)` and `dry_run: true` in
+  `cosai.yaml` log violations at WARNING and audit them as `"dry_run_violation"` events
+  without blocking requests. `NOT FOR PRODUCTION`.
+- **BoundaryEngine normalization pipeline** — `_normalize_for_injection_scan()` adds
+  whitespace collapse, zero-width / soft-hyphen stripping, bidi override char stripping,
+  and Base64 decode-and-rescan before pattern matching, closing obfuscation bypasses.
+- **`load_config` warns when `dry_run: true` loaded from YAML** — emits a WARNING log
+  immediately on parse so the setting is never silently active in production.
+
+**Test count:** 563 passing (was 508; +55 new tests covering the above)
+
 ## [Unreleased]
 
 ### Added

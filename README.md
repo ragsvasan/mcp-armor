@@ -104,9 +104,10 @@ CrowdStrike's *"90-Day Roadmap for Securing Agentic AI"* whitepaper correctly id
 mcp-armor *is* that in-call-path implementation, as OSS:
 
 - **In-process, not a sidecar SOC.** mcp-armor runs inside the MCP server and sees tool responses and LLM re-feed before they leave the process. No external agent, no vendor trust anchor.
-- **Hash-chained tamper-evident audit (T12).** Not fire-and-forget logging — a SHA-256 chain with DAG parent tracking that detects tampering on next startup. Forensics-ready without a separate SIEM contract.
+- **HMAC-signed tamper-evident audit (T12).** Not fire-and-forget logging — an HMAC-SHA256 chain (when `ARMOR_AUDIT_HMAC_KEY` is set) with DAG parent tracking and a sticky marker file that prevents silent downgrade. Detects both field tampering and log truncation. Forensics-ready without a separate SIEM contract.
 - **Signed supply chain shipped, not aspirational (T6/T11).** Their roadmap *recommends* signed manifests; mcp-armor enforces Ed25519 registry signatures and blocks unsigned/typosquatted tools by default.
 - **RE2-only, fail-closed.** Linear-time regex (no catastrophic backtracking DoS), frozen-dataclass immutability eliminating async context bleed — production-grade details closed platforms don't expose or guarantee.
+- **`dry_run` mode for safe config tuning (NOT FOR PRODUCTION).** `CoSAIGuard(dry_run=True)` logs violations at WARNING and audits them without blocking, so you can tune policy thresholds before enabling enforcement. Auth errors always re-raise even in dry_run.
 
 Roadmap (closing the remaining CrowdStrike workstreams as OSS controls): SIEM/SOAR emitter + anomaly thresholds (WS4), non-bypassable out-of-band human approval so an agent cannot resubmit its own confirmation token (WS7), and an incident-response containment orchestrator — pause tool / quarantine server / freeze session / revoke creds wired to engine exceptions (WS8). See [docs/VISION.md](docs/VISION.md#positioning-vs-commercial-platforms) for the full mapping.
 

@@ -201,15 +201,84 @@ The scanner detects T1/T3/T8/T10 failures from outside. mcp-armor enforces T4/T9
 | Auth header check, JTI replay detection, DPoP binding | T1 |
 | Per-tool scope enforcement, confused deputy prevention | T2 |
 | JSON schema strict mode, injection guards, size limit | T3 |
-| 18 injection patterns — tool definitions + response bodies | T4 |
+| 24 injection patterns — tool definitions + call args + response bodies, with normalization pipeline | T4 |
 | PII scrubbing (5 profiles: minimal / pci / hipaa / gdpr / strict) | T5 |
 | Manifest hash + drift detection, typosquatting check | T6 |
 | Session fixation prevention, cross-transport replay block | T7 |
 | Bind address check, SSRF prevention | T8 |
 | LLM output sanitization — 5-step pipeline | T9 |
-| Call budget, wall-clock limit, loop depth, heartbeat | T10 |
+| Call budget, wall-clock limit, loop depth, active heartbeat reaper | T10 |
 | Tool allowlist, registry signature check | T11 |
-| Hash-chained JSON Lines audit log, DAG tracing | T12 |
+| HMAC-signed hash-chained JSON Lines audit log, DAG tracing | T12 |
+
+---
+
+## 9. Production Security Checklist
+
+Before deploying mcp-armor to production, complete the following:
+
+### 1. Set the HMAC audit key
+
+Every production deployment must set `ARMOR_AUDIT_HMAC_KEY`. Without it, a sophisticated
+attacker who gains write access to the log file can truncate it and recalculate all chain
+hashes, erasing evidence without detection.
+
+Generate a key:
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Store in your secret manager (Vault, AWS Secrets Manager, GCP Secret Manager). Set as an
+environment variable — never in `cosai.yaml` or source control.
+
+```bash
+export ARMOR_AUDIT_HMAC_KEY=<64-char hex string>
+```
+
+Once set, the `.hmac_enabled` marker file prevents future deployments from accidentally
+omitting the key. If you rotate the key, set `ARMOR_AUDIT_HMAC_KEY_PREV` to the old key
+during the rotation grace period.
+
+### 2. Never enable `dry_run: true` in production
+
+`dry_run: true` (in `cosai.yaml` or `CoSAIGuard(dry_run=True)`) disables all enforcement.
+Violations are logged but not blocked. Use it only for local configuration tuning.
+
+Check your config before deploying:
+```bash
+grep -i dry_run cosai.yaml
+# Must be absent or 'dry_run: false'
+```
+
+### 3. Understand the `echo_confirm_token` tradeoff for destructive tools
+
+For tools marked `destructive: true` in `tool_policies`, the two-stage commit gate issues
+a confirmation token on the first call. The `echo_confirm_token` setting controls delivery:
+
+- `echo_confirm_token: false` (default) — token written to server log only; automated
+  clients cannot complete the flow.
+- `echo_confirm_token: true` — token returned in the JSON-RPC error body; any client can
+  complete the flow, including autonomous LLM agents that auto-resubmit it.
+
+**The gate is only meaningful when a human intercepts the error before it reaches the
+agent.** For fully autonomous pipelines with no human-in-the-loop, the gate provides no
+protection regardless of this setting. See [SECURITY.md](SECURITY.md) for the full analysis.
+
+### 4. Tune the heartbeat interval
+
+`ResourceEngine` evicts zombie sessions (no activity within `heartbeat_interval_secs`).
+The default is 30 seconds. For high-churn workloads, reduce it:
+
+```yaml
+threats:
+  T10:
+    heartbeat_interval_secs: 10   # evict faster
+```
+
+For long-running human-assisted sessions, increase it:
+```yaml
+    heartbeat_interval_secs: 120  # 2 minutes
+```
 
 ---
 

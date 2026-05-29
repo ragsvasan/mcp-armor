@@ -1,7 +1,7 @@
 # CoSAI Server-Side SDK — Design Document
 
-**Date:** 2026-04-28  
-**Status:** Implemented — v0.1.0  
+**Date:** 2026-04-28 (updated 2026-05-28)  
+**Status:** Implemented — v0.2.0  
 **Context:** This document captures the design rationale for mcp-armor, a server-side
 protection library covering all 12 CoSAI threat categories.
 
@@ -289,6 +289,28 @@ class ProtectionEngine(Protocol):
 ```
 
 `CoSAIGuard` assembles the chain in the correct order and drives each hook.
+
+---
+
+## Design Principles (v0.2.0 additions)
+
+**Async-safe audit writes.** All audit I/O is dispatched via `asyncio.to_thread`. An
+`asyncio.Lock` wraps seq-assignment and the disk write as one atomic unit — the event
+loop is never blocked and concurrent coroutines cannot produce duplicate `prev_hash`
+values.
+
+**`dry_run` is explicitly NOT FOR PRODUCTION.** The `dry_run` mode exists solely for
+configuration tuning in non-production environments. When active, all security
+violations are logged at WARNING and audited as `"dry_run_violation"` events, but no
+request is blocked (except auth errors — those always re-raise). Both the guard
+constructor and the config loader log a WARNING when dry_run is activated. The flag
+name and all docs emphasize: NOT FOR PRODUCTION.
+
+**HMAC audit chain integrity is the default production posture.** Pure SHA-256 chaining
+detects field tampering but not log truncation followed by chain recalculation. Setting
+`ARMOR_AUDIT_HMAC_KEY` closes this gap. The `.hmac_enabled` sticky marker prevents a
+subsequent deployment from silently downgrading integrity by omitting the key. This
+makes HMAC enforcement sticky — once enabled, it cannot be removed accidentally.
 
 ---
 
