@@ -105,6 +105,26 @@ The scanner and mcp-armor cover different parts of the threat surface. Use both.
 
 ---
 
+## Positioning vs. commercial platforms
+
+CrowdStrike's *"AI Agent Security: A Practical 90-Day Roadmap for Securing Agentic AI"* defines an 8-workstream roadmap and sells its implementation as a closed Falcon module. mcp-armor (runtime enforcement) + [cosai-mcp](https://github.com/cosai-oasis/cosai-mcp) (CI-time proof) implement the same control set as OSS, anchored on cryptographic verification rather than vendor trust.
+
+Honest status — *shipped* vs *roadmap*:
+
+| # | CrowdStrike workstream | mcp-armor status |
+|---|------------------------|------------------|
+| 1 | Tool Inventory & Classification | Partial — per-tool `ToolPolicy` (scopes, `destructive`, `tenant_isolated`); roadmap: risk-tier + owner registry parse. |
+| 2 | Auth, Identity & Version Control | **Shipped — exceeds:** `AuthEngine` (JWT+DPoP), `SessionEngine` transport binding, `SupplyChainEngine` Ed25519 + allowlist. |
+| 3 | Prompt/Tool-Execution Guardrails | **Shipped — exceeds:** `BoundaryEngine` (24 OWASP patterns), `ValidationEngine`, `NetworkEngine` SSRF, RE2-only. |
+| 4 | Observability for Planning & Tool Calls | Partial — `AuditEngine` hash-chained DAG log; **roadmap:** SIEM/SOAR emitter + anomaly thresholds. |
+| 5 | Governance / Capability Drift | Partial — `IntegrityEngine` rug-pull detection; **roadmap:** approval-gate workflow + baseline registry. |
+| 6 | Restrict Non-Human Identities | Partial — per-tool scopes, tenant isolation; **roadmap:** rotation enforcement + NHI anomaly monitor. |
+| 7 | Human-in-the-Loop | Partial — `AuthzEngine` destructive token gate; **roadmap:** non-bypassable out-of-band approval (agent cannot resubmit its own token — current gap is a real security hole, not just a feature gap). |
+| 8 | Agent Incident Response | Roadmap — containment primitives exist (resource kill, tool blocking); orchestration + severity tiers + playbooks to follow. |
+| ★ | *Not in CrowdStrike* | Roadmap — signed **MCP Security Conformance Level**: scanner proof ↔ runtime enforcement ↔ audit chain as one verifiable artifact. A closed platform cannot offer vendor-independent conformance proof. |
+
+The differentiator is the trust model: a closed SOC product asks you to believe its dashboard; mcp-armor's enforcement is in-process and its audit chain is independently verifiable.
+
 ## What It Is Not
 
 - **Not a replacement for cosai-mcp.** The scanner detects protocol-level failures that require seeing the server's responses to adversarial inputs. mcp-armor cannot replicate that from inside.

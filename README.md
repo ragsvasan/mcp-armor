@@ -97,6 +97,19 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture, three-layer call
 
 [cosai-mcp](https://github.com/cosai-oasis/cosai-mcp) is the black-box scanner — it probes your server from the outside. mcp-armor is the server-side SDK — it runs inside your server. They are complementary: use the scanner in CI to detect protocol-level failures, use mcp-armor at runtime for defence.
 
+## vs. commercial agentic-AI platforms (CrowdStrike, et al.)
+
+CrowdStrike's *"90-Day Roadmap for Securing Agentic AI"* whitepaper correctly identifies that T4 tool poisoning, T9 trust-boundary, and T12 audit failures live **inside the call path** — then sells the implementation as a closed Falcon module backed by an external agent you must trust and purchase.
+
+mcp-armor *is* that in-call-path implementation, as OSS:
+
+- **In-process, not a sidecar SOC.** mcp-armor runs inside the MCP server and sees tool responses and LLM re-feed before they leave the process. No external agent, no vendor trust anchor.
+- **Hash-chained tamper-evident audit (T12).** Not fire-and-forget logging — a SHA-256 chain with DAG parent tracking that detects tampering on next startup. Forensics-ready without a separate SIEM contract.
+- **Signed supply chain shipped, not aspirational (T6/T11).** Their roadmap *recommends* signed manifests; mcp-armor enforces Ed25519 registry signatures and blocks unsigned/typosquatted tools by default.
+- **RE2-only, fail-closed.** Linear-time regex (no catastrophic backtracking DoS), frozen-dataclass immutability eliminating async context bleed — production-grade details closed platforms don't expose or guarantee.
+
+Roadmap (closing the remaining CrowdStrike workstreams as OSS controls): SIEM/SOAR emitter + anomaly thresholds (WS4), non-bypassable out-of-band human approval so an agent cannot resubmit its own confirmation token (WS7), and an incident-response containment orchestrator — pause tool / quarantine server / freeze session / revoke creds wired to engine exceptions (WS8). See [docs/VISION.md](docs/VISION.md#positioning-vs-commercial-platforms) for the full mapping.
+
 ## License
 
 Apache 2.0

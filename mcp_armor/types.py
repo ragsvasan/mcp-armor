@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import html
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
 from typing import Any
+
+# Unicode bidirectional override / embedding / isolate formatting characters.
+# Stripped before injection and PII scanning so that bidi chars inserted between
+# letters (e.g. ig[U+202E]nore) cannot split keywords and evade regex patterns.
+# U+202A–U+202E: LRE, RLE, PDF, LRO, RLO
+# U+2066–U+2069: LRI, RLI, FSI, PDI
+BIDI_CHARS_RE = re.compile("[‪-‮⁦-⁩]")
 
 
 class Severity(str, Enum):
@@ -36,9 +44,9 @@ class ThreatCategory(str, Enum):
 class Finding:
     threat: ThreatCategory
     severity: Severity
-    code: str                  # e.g. "T1-001"
-    message: str               # human-readable, no PII
-    location: str              # where in the request/response
+    code: str  # e.g. "T1-001"
+    message: str  # human-readable, no PII
+    location: str  # where in the request/response
     remediation: str
 
 
@@ -47,15 +55,17 @@ class Finding:
 # first-class MCP methods that resolve URIs / templated content — entirely
 # unauthorized, unvalidated and SSRF-unchecked. These methods carry attacker-
 # influenced content that must run the same scanning chain as tools/call.
-CONTENT_BEARING_METHODS: frozenset[str] = frozenset({
-    "tools/call",
-    "resources/read",
-    "resources/subscribe",
-    "prompts/get",
-})
+CONTENT_BEARING_METHODS: frozenset[str] = frozenset(
+    {
+        "tools/call",
+        "resources/read",
+        "resources/subscribe",
+        "prompts/get",
+    }
+)
 
 
-def scannable_strings(req: "MCPRequest") -> dict[str, Any]:
+def scannable_strings(req: MCPRequest) -> dict[str, Any]:
     """
     Return the attacker-influenced fields of a content-bearing request that
     must be scanned by validation/boundary/SSRF engines.
@@ -86,7 +96,7 @@ def scannable_strings(req: "MCPRequest") -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class MCPRequest:
-    method: str                              # e.g. "tools/call"
+    method: str  # e.g. "tools/call"
     params: MappingProxyType[str, Any]
     session_id: str
     raw_headers: MappingProxyType[str, str]
@@ -105,7 +115,7 @@ class MCPRequest:
         headers: dict[str, str],
         url_query_params: dict[str, str] | None = None,
         transport: str = "http",
-    ) -> "MCPRequest":
+    ) -> MCPRequest:
         return cls(
             method=str(d.get("method", "")),
             params=MappingProxyType(dict(d.get("params", {}))),
@@ -135,6 +145,9 @@ def normalize_for_scan(text: str) -> str:
         if nxt == prev:
             break
         prev = nxt
+    # Strip bidi formatting chars after entity decode so that entity-encoded
+    # bidi chars (e.g. &#x202E;) are also removed before pattern matching.
+    prev = BIDI_CHARS_RE.sub("", prev)
     return unicodedata.normalize("NFKC", prev)
 
 
@@ -142,7 +155,7 @@ def normalize_for_scan(text: str) -> str:
 class MCPResponse:
     result: MappingProxyType[str, Any] | None
     error: MappingProxyType[str, Any] | None
-    raw_body: str              # HTML-escaped — safe for downstream rendering
+    raw_body: str  # HTML-escaped — safe for downstream rendering
     # Raw, pre-escape, entity-decoded text the detectors MUST scan (F1 fix).
     # Optional in the constructor: when omitted it is derived from raw_body by
     # entity-decoding, so legacy callers and tests that pass an already-raw
@@ -155,22 +168,20 @@ class MCPResponse:
             # Derive a scannable view: decode any HTML entities present in
             # raw_body (covers the F1 escape) and NFKC-normalize. Fail-safe:
             # if raw_body was never escaped this is an identity transform.
-            object.__setattr__(
-                self, "scan_body", normalize_for_scan(self.raw_body)
-            )
+            object.__setattr__(self, "scan_body", normalize_for_scan(self.raw_body))
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "MCPResponse":
+    def from_dict(cls, d: dict[str, Any]) -> MCPResponse:
         raw = str(d)[:65536]
         return cls(
             result=MappingProxyType(d["result"]) if "result" in d else None,
             error=MappingProxyType(d["error"]) if "error" in d else None,
-            raw_body=html.escape(raw, quote=True),     # cap + escape for rendering
-            scan_body=normalize_for_scan(raw),         # what detectors must see (F1)
+            raw_body=html.escape(raw, quote=True),  # cap + escape for rendering
+            scan_body=normalize_for_scan(raw),  # what detectors must see (F1)
         )
 
     @classmethod
-    def from_text(cls, text: str) -> "MCPResponse":
+    def from_text(cls, text: str) -> MCPResponse:
         """Build a response from a raw text payload (decorator / per-tool path).
 
         Keeps an unescaped, entity-decoded copy for detection so the F1
@@ -189,17 +200,17 @@ class MCPResponse:
 @dataclass(frozen=True)
 class BudgetState:
     calls_used: int
-    wall_clock_start: float    # time.monotonic() at session start
+    wall_clock_start: float  # time.monotonic() at session start
     loop_depth: int
 
-    def increment(self) -> "BudgetState":
+    def increment(self) -> BudgetState:
         return BudgetState(
             calls_used=self.calls_used + 1,
             wall_clock_start=self.wall_clock_start,
             loop_depth=self.loop_depth,
         )
 
-    def descend(self) -> "BudgetState":
+    def descend(self) -> BudgetState:
         return BudgetState(
             calls_used=self.calls_used,
             wall_clock_start=self.wall_clock_start,

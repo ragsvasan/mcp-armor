@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote_plus
 
 if TYPE_CHECKING:
@@ -23,18 +24,18 @@ _SESSION_HEADER_STR = "mcp-session-id"
 
 # Opaque error messages keyed by JSON-RPC code — aligned with CoSAIException subclasses
 _OPAQUE_MESSAGES: dict[int, str] = {
-    -32001: "Authentication error",         # AuthenticationError (T1)
-    -32002: "Authorization error",          # AuthorizationError (T2)
-    -32003: "Injection detected",           # InjectionDetectedError (T4)
-    -32004: "PII leak detected",            # PIILeakError (T5)
-    -32005: "Integrity error",              # IntegrityError (T6)
-    -32006: "Session error",                # SessionError (T7)
-    -32007: "Trust boundary violation",     # TrustBoundaryViolation (T9)
-    -32008: "Network binding error",        # NetworkBindingError (T8)
-    -32009: "Audit chain error",            # AuditChainError (T12)
-    -32010: "Resource limit exceeded",      # ResourceExceededError (T10)
-    -32011: "Supply chain error",           # SupplyChainError (T11)
-    -32602: "Validation error",             # ValidationError (T3, standard invalid params)
+    -32001: "Authentication error",  # AuthenticationError (T1)
+    -32002: "Authorization error",  # AuthorizationError (T2)
+    -32003: "Injection detected",  # InjectionDetectedError (T4)
+    -32004: "PII leak detected",  # PIILeakError (T5)
+    -32005: "Integrity error",  # IntegrityError (T6)
+    -32006: "Session error",  # SessionError (T7)
+    -32007: "Trust boundary violation",  # TrustBoundaryViolation (T9)
+    -32008: "Network binding error",  # NetworkBindingError (T8)
+    -32009: "Audit chain error",  # AuditChainError (T12)
+    -32010: "Resource limit exceeded",  # ResourceExceededError (T10)
+    -32011: "Supply chain error",  # SupplyChainError (T11)
+    -32602: "Validation error",  # ValidationError (T3, standard invalid params)
 }
 
 # Body size cap enforced during buffering — before deserialization (FIX-4)
@@ -75,7 +76,7 @@ class ArmorMiddleware:
     def __init__(
         self,
         app: Any,
-        guard: "CoSAIGuard",
+        guard: CoSAIGuard,
         max_body_bytes: int = _DEFAULT_MAX_BODY,
         cors_origins: list[str] | None = None,
     ) -> None:
@@ -96,6 +97,19 @@ class ArmorMiddleware:
             )
         # Tracks open sessions for clean shutdown — session_id → CoSAIContext
         self._active_sessions: dict[str, Any] = {}
+
+        # Fix 9: wire the ResourceEngine eviction callback so reaped sessions
+        # are also removed from _active_sessions (prevents memory leak).
+        from ..engines.resources import ResourceEngine
+
+        for engine in guard._engines:
+            if isinstance(engine, ResourceEngine):
+
+                def _evict(sid: str, _sessions: dict = self._active_sessions) -> None:
+                    _sessions.pop(sid, None)
+
+                engine._eviction_callback = _evict
+                break
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
@@ -127,9 +141,8 @@ class ArmorMiddleware:
         async def _app_send(message: dict) -> None:
             await app_send_q.put(message)
 
-        app_task = asyncio.get_event_loop().create_task(
-            self._app(scope, _app_receive, _app_send)
-        )
+        # Fix 5: use get_running_loop() — get_event_loop() is deprecated in 3.10+
+        app_task = asyncio.get_running_loop().create_task(self._app(scope, _app_receive, _app_send))
 
         while True:
             message = await receive()
@@ -168,15 +181,14 @@ class ArmorMiddleware:
     # -------------------------------------------------------------------------
 
     async def _handle_http(self, scope: Scope, receive: Receive, send: Send) -> None:
-        from ..types import MCPRequest, MCPResponse
         from ..context import CoSAIContext, set_context
         from ..exceptions import CoSAIException
+        from ..types import MCPRequest, MCPResponse
 
         # Decode headers early — needed before buffering for Content-Encoding and
         # Content-Type checks. Decoding once here avoids a second pass later.
         raw_headers: dict[str, str] = {
-            k.decode("latin-1"): v.decode("latin-1")
-            for k, v in scope.get("headers", [])
+            k.decode("latin-1"): v.decode("latin-1") for k, v in scope.get("headers", [])
         }
 
         # T7-001 / T07-001: CORS origin validation.
@@ -186,8 +198,7 @@ class ArmorMiddleware:
         request_origin = raw_headers.get("origin", "")
         if self._cors_origins is not None and request_origin:
             if request_origin not in self._cors_origins:
-                await _send_error(send, None, -32600,
-                                  "Origin not in CORS allowlist (T7-001)")
+                await _send_error(send, None, -32600, "Origin not in CORS allowlist (T7-001)")
                 return
 
         # Reject compressed bodies before buffering — the pre-parse size cap covers
@@ -207,8 +218,9 @@ class ArmorMiddleware:
             chunk = msg.get("body", b"")
             accumulated += len(chunk)
             if accumulated > self._max_body_bytes:
-                await _send_error(send, None, -32600,
-                                  f"Payload exceeds {self._max_body_bytes} bytes")
+                await _send_error(
+                    send, None, -32600, f"Payload exceeds {self._max_body_bytes} bytes"
+                )
                 return
             body_parts.append(chunk)
             more = msg.get("more_body", False)
@@ -218,8 +230,7 @@ class ArmorMiddleware:
         if raw_body:
             ct = raw_headers.get("content-type", "").split(";")[0].strip()
             if ct and ct != "application/json":
-                await _send_error(send, None, -32600,
-                                  "Content-Type must be application/json")
+                await _send_error(send, None, -32600, "Content-Type must be application/json")
                 return
 
         # Parse JSON — reject non-dict shapes (batch arrays, scalars) before .get() calls
@@ -230,8 +241,7 @@ class ArmorMiddleware:
             return
 
         if not isinstance(parsed, dict):
-            await _send_error(send, None, -32600,
-                              "Invalid Request: expected a JSON object")
+            await _send_error(send, None, -32600, "Invalid Request: expected a JSON object")
             return
 
         payload: dict[str, Any] = parsed
@@ -252,8 +262,7 @@ class ArmorMiddleware:
             session_id = raw_headers.get(_SESSION_HEADER_STR, "")
             is_new_session = False
             if not session_id:
-                await _send_error(send, request_id, -32600,
-                                  "Missing Mcp-Session-Id header")
+                await _send_error(send, request_id, -32600, "Missing Mcp-Session-Id header")
                 return
 
         # F4 / F7 fix: an MCP session spans many HTTP requests. Recreating a
@@ -283,152 +292,169 @@ class ArmorMiddleware:
                 ctx = CoSAIContext.new(session_id, transport="http")
         set_context(ctx)
 
-        # FIX-6: catch all exceptions — unexpected errors must not leak tracebacks
+        # Fix 2: expose the live CoSAIContext via ContextVar so @guard.protect
+        # decorators running inside this request see real JWT scopes.
+        # Fix 8: save the reset token so we can restore the ContextVar to its
+        # previous value (None) in the finally block — prevents ctx bleed into
+        # background tasks or the next request handled by the same asyncio Task.
+        from ..guard import _active_ctx as _armor_active_ctx
+
+        _armor_ctx_token = _armor_active_ctx.set(ctx)
         try:
-            if is_new_session:
-                ctx = await self._guard.open_session(ctx)
-                set_context(ctx)
-                # FIX-1: track for shutdown drain
-                self._active_sessions[session_id] = ctx
-
-            req = MCPRequest.from_dict(
-                payload,
-                session_id=session_id,
-                headers=raw_headers,
-                url_query_params=url_query_params,
-                transport="http",
-            )
-            ctx = await self._guard._run_request(ctx, req)
-            set_context(ctx)
-            # F4 / F7 fix: persist the evolving context (incremented budget,
-            # manifest hash, findings) so the NEXT request in this session
-            # sees it. Only track sessions we actually opened — an unknown
-            # session id is rejected by SessionEngine before reaching here.
-            if session_id in self._active_sessions:
-                self._active_sessions[session_id] = ctx
-
-        except CoSAIException as exc:
-            # FIX-5: log full detail internally; send opaque message to client.
-            # T10-004: ResourceExceededError is returned as HTTP 429 (not JSON-RPC 200)
-            # so that HTTP-layer rate-limiters (proxies, cosai-mcp T10-004 probe) detect it.
-            log.warning("Guard rejected request [%s]: %s", exc.__class__.__name__, exc)
-            from ..exceptions import ResourceExceededError
-            if isinstance(exc, ResourceExceededError):
-                await _send_rate_limited(send, request_id)
-                return
-            client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Request rejected")
-            await _send_error(send, request_id, exc.json_rpc_code, client_msg)
-            return
-        except Exception as exc:
-            # FIX-6: unexpected engine failure — internal error only
-            log.error("Unexpected guard error on request: %s", exc, exc_info=True)
-            await _send_error(send, request_id, -32603, "Internal error")
-            return
-
-        # Buffer the entire upstream response before running the response-phase guard.
-        # Nothing is sent to the client until all response engines pass — violations
-        # replace the response with an opaque JSON-RPC error (P0 fix).
-        response_start_msg: dict | None = None
-        response_body_parts: list[bytes] = []
-
-        async def buffering_send(message: dict) -> None:
-            nonlocal response_start_msg
-            if message["type"] == "http.response.start":
-                if is_new_session:
-                    # Strip any upstream Mcp-Session-Id — clients must use armor's
-                    # CSPRNG-generated session_id (T7-001).
-                    headers = [
-                        (k, v) for k, v in message.get("headers", [])
-                        if k.lower() != _SESSION_HEADER
-                    ]
-                    headers.append((_SESSION_HEADER, session_id.encode("ascii")))
-                    message = {**message, "headers": headers}
-                response_start_msg = message
-            elif message["type"] == "http.response.body":
-                response_body_parts.append(message.get("body", b""))
-            # Do NOT forward to `send` here — buffer everything until guard passes.
-
-        body_iter = iter([
-            {"type": "http.request", "body": raw_body, "more_body": False}
-        ])
-
-        async def replay_receive() -> dict:
+            # FIX-6: catch all exceptions — unexpected errors must not leak tracebacks
             try:
-                return next(body_iter)
-            except StopIteration:
-                return {"type": "http.disconnect"}
+                if is_new_session:
+                    ctx = await self._guard.open_session(ctx)
+                    set_context(ctx)
+                    _armor_active_ctx.set(ctx)
+                    # FIX-1: track for shutdown drain
+                    self._active_sessions[session_id] = ctx
 
-        await self._app(scope, replay_receive, buffering_send)
+                req = MCPRequest.from_dict(
+                    payload,
+                    session_id=session_id,
+                    headers=raw_headers,
+                    url_query_params=url_query_params,
+                    transport="http",
+                )
+                ctx = await self._guard._run_request(ctx, req)
+                set_context(ctx)
+                _armor_active_ctx.set(ctx)
+                # F4 / F7 fix: persist the evolving context (incremented budget,
+                # manifest hash, findings) so the NEXT request in this session
+                # sees it. Only track sessions we actually opened — an unknown
+                # session id is rejected by SessionEngine before reaching here.
+                if session_id in self._active_sessions:
+                    self._active_sessions[session_id] = ctx
 
-        # Run response-phase guard BEFORE committing response to client.
-        resp_raw = b"".join(response_body_parts)
-        try:
-            resp_dict = json.loads(resp_raw) if resp_raw else {}
-        except json.JSONDecodeError:
-            resp_dict = {}
-        resp = MCPResponse.from_dict(resp_dict)
-        try:
-            ctx = await self._guard._run_response(ctx, resp)
-            # F4 fix: persist the post-response context so the tools/list
-            # manifest hash snapshot survives into the next request — that
-            # is what makes mid-session rug-pull (T6-001) detectable.
-            if session_id in self._active_sessions:
-                self._active_sessions[session_id] = ctx
-        except CoSAIException as exc:
-            log.warning("Guard response violation [%s]: %s", exc.__class__.__name__, exc)
-            client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Response rejected")
-            await _send_error(send, request_id, exc.json_rpc_code, client_msg)
-            return
-        except Exception as exc:
-            log.error("Unexpected guard error on response: %s", exc, exc_info=True)
-            await _send_error(send, request_id, -32603, "Internal error")
-            return
+            except CoSAIException as exc:
+                # FIX-5: log full detail internally; send opaque message to client.
+                # T10-004: ResourceExceededError is returned as HTTP 429 (not JSON-RPC 200)
+                # so that HTTP-layer rate-limiters (proxies, cosai-mcp T10-004 probe) detect it.
+                log.warning("Guard rejected request [%s]: %s", exc.__class__.__name__, exc)
+                from ..exceptions import ResourceExceededError
 
-        # T2-004b / cosai-mcp T02-004: scope-filter the tools/list manifest.
-        # A caller must not discover tool names they cannot call.  Re-serialise the
-        # filtered manifest and update content-length so the client receives a
-        # consistent response.
-        if method == "tools/list" and resp_dict:
-            tools_result = resp_dict.get("result", {})
-            if isinstance(tools_result, dict):
-                raw_tools = tools_result.get("tools", [])
-                if isinstance(raw_tools, list):
-                    tool_names = [
-                        t.get("name", "") for t in raw_tools if isinstance(t, dict)
-                    ]
-                    allowed_names = set(self._guard.filter_tools_list(tool_names, ctx))
-                    filtered_tools = [
-                        t for t in raw_tools
-                        if isinstance(t, dict) and t.get("name") in allowed_names
-                    ]
-                    if len(filtered_tools) != len(raw_tools):
-                        filtered_resp = {
-                            **resp_dict,
-                            "result": {**tools_result, "tools": filtered_tools},
-                        }
-                        resp_raw = json.dumps(filtered_resp).encode()
-                        # Patch content-length in the already-captured start message.
-                        if response_start_msg is not None:
-                            patched_headers = [
-                                (k, v) for k, v in response_start_msg.get("headers", [])
-                                if k.lower() != b"content-length"
-                            ]
-                            patched_headers.append(
-                                (b"content-length", str(len(resp_raw)).encode())
-                            )
-                            response_start_msg = {
-                                **response_start_msg, "headers": patched_headers
+                if isinstance(exc, ResourceExceededError):
+                    await _send_rate_limited(send, request_id)
+                    return
+                client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Request rejected")
+                await _send_error(send, request_id, exc.json_rpc_code, client_msg)
+                return
+            except Exception as exc:
+                # FIX-6: unexpected engine failure — internal error only
+                log.error("Unexpected guard error on request: %s", exc, exc_info=True)
+                await _send_error(send, request_id, -32603, "Internal error")
+                return
+
+            # Buffer the entire upstream response before running the response-phase guard.
+            # Nothing is sent to the client until all response engines pass — violations
+            # replace the response with an opaque JSON-RPC error (P0 fix).
+            response_start_msg: dict | None = None
+            response_body_parts: list[bytes] = []
+
+            async def buffering_send(message: dict) -> None:
+                nonlocal response_start_msg
+                if message["type"] == "http.response.start":
+                    if is_new_session:
+                        # Strip any upstream Mcp-Session-Id — clients must use armor's
+                        # CSPRNG-generated session_id (T7-001).
+                        headers = [
+                            (k, v)
+                            for k, v in message.get("headers", [])
+                            if k.lower() != _SESSION_HEADER
+                        ]
+                        headers.append((_SESSION_HEADER, session_id.encode("ascii")))
+                        message = {**message, "headers": headers}
+                    response_start_msg = message
+                elif message["type"] == "http.response.body":
+                    response_body_parts.append(message.get("body", b""))
+                # Do NOT forward to `send` here — buffer everything until guard passes.
+
+            body_iter = iter([{"type": "http.request", "body": raw_body, "more_body": False}])
+
+            async def replay_receive() -> dict:
+                try:
+                    return next(body_iter)
+                except StopIteration:
+                    return {"type": "http.disconnect"}
+
+            await self._app(scope, replay_receive, buffering_send)
+
+            # Run response-phase guard BEFORE committing response to client.
+            resp_raw = b"".join(response_body_parts)
+            try:
+                resp_dict = json.loads(resp_raw) if resp_raw else {}
+            except json.JSONDecodeError:
+                resp_dict = {}
+            resp = MCPResponse.from_dict(resp_dict)
+            try:
+                ctx = await self._guard._run_response(ctx, resp)
+                # F4 fix: persist the post-response context so the tools/list
+                # manifest hash snapshot survives into the next request — that
+                # is what makes mid-session rug-pull (T6-001) detectable.
+                if session_id in self._active_sessions:
+                    self._active_sessions[session_id] = ctx
+            except CoSAIException as exc:
+                log.warning("Guard response violation [%s]: %s", exc.__class__.__name__, exc)
+                client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Response rejected")
+                await _send_error(send, request_id, exc.json_rpc_code, client_msg)
+                return
+            except Exception as exc:
+                log.error("Unexpected guard error on response: %s", exc, exc_info=True)
+                await _send_error(send, request_id, -32603, "Internal error")
+                return
+
+            # T2-004b / cosai-mcp T02-004: scope-filter the tools/list manifest.
+            # A caller must not discover tool names they cannot call.  Re-serialise the
+            # filtered manifest and update content-length so the client receives a
+            # consistent response.
+            if method == "tools/list" and resp_dict:
+                tools_result = resp_dict.get("result", {})
+                if isinstance(tools_result, dict):
+                    raw_tools = tools_result.get("tools", [])
+                    if isinstance(raw_tools, list):
+                        tool_names = [t.get("name", "") for t in raw_tools if isinstance(t, dict)]
+                        allowed_names = set(self._guard.filter_tools_list(tool_names, ctx))
+                        filtered_tools = [
+                            t
+                            for t in raw_tools
+                            if isinstance(t, dict) and t.get("name") in allowed_names
+                        ]
+                        if len(filtered_tools) != len(raw_tools):
+                            filtered_resp = {
+                                **resp_dict,
+                                "result": {**tools_result, "tools": filtered_tools},
                             }
+                            resp_raw = json.dumps(filtered_resp).encode()
+                            # Patch content-length in the already-captured start message.
+                            if response_start_msg is not None:
+                                patched_headers = [
+                                    (k, v)
+                                    for k, v in response_start_msg.get("headers", [])
+                                    if k.lower() != b"content-length"
+                                ]
+                                patched_headers.append(
+                                    (b"content-length", str(len(resp_raw)).encode())
+                                )
+                                response_start_msg = {
+                                    **response_start_msg,
+                                    "headers": patched_headers,
+                                }
 
-        # Guard passed — replay buffered response to client.
-        if response_start_msg is not None:
-            await send(response_start_msg)
-        await send({"type": "http.response.body", "body": resp_raw, "more_body": False})
+            # Guard passed — replay buffered response to client.
+            if response_start_msg is not None:
+                await send(response_start_msg)
+            await send({"type": "http.response.body", "body": resp_raw, "more_body": False})
+        finally:
+            # Fix 8: reset ContextVar so no ctx bleeds into background tasks
+            # or the next request handled on the same asyncio Task.
+            _armor_active_ctx.reset(_armor_ctx_token)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_qs(query_string: str) -> dict[str, str]:
     """Parse a URL query string with percent-decoding (FIX-2: prevents T7-002 bypass)."""
@@ -446,19 +472,23 @@ def _parse_qs(query_string: str) -> dict[str, str]:
 
 async def _send_error(send: Send, request_id: Any, code: int, message: str) -> None:
     """Send a JSON-RPC 2.0 error response (HTTP 200 per JSON-RPC spec)."""
-    body = json.dumps({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {"code": code, "message": message},
-    }).encode()
-    await send({
-        "type": "http.response.start",
-        "status": 200,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-        ],
-    })
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+        }
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
@@ -470,18 +500,22 @@ async def _send_rate_limited(send: Send, request_id: Any) -> None:
     - cosai-mcp T10-004 probe (which checks response.status_code status_in [429, 503]) passes
     - RFC 6585 §4 is honoured: rate limit responses at the HTTP layer, not buried in JSON-RPC
     """
-    body = json.dumps({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {"code": -32010, "message": "Rate limit exceeded — retry after 60 seconds"},
-    }).encode()
-    await send({
-        "type": "http.response.start",
-        "status": 429,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-            (b"retry-after", b"60"),
-        ],
-    })
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32010, "message": "Rate limit exceeded — retry after 60 seconds"},
+        }
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 429,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"retry-after", b"60"),
+            ],
+        }
+    )
     await send({"type": "http.response.body", "body": body, "more_body": False})

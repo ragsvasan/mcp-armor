@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import html
+import itertools
+import re
+import unicodedata
 from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import InjectionDetectedError
 from ..types import (
+    BIDI_CHARS_RE,
     Finding,
     MCPRequest,
     MCPResponse,
@@ -19,6 +25,105 @@ from ..types import (
 # when re2 is unavailable. Injection phrases are short; this doesn't create a
 # meaningful detection gap.
 _MAX_SCAN_LEN = 8_192
+
+# ---------------------------------------------------------------------------
+# Normalization pipeline (Fix 7)
+# ---------------------------------------------------------------------------
+
+# Zero-width and invisible characters that are used to split keywords
+_ZERO_WIDTH_CHARS = (
+    "​"  # zero-width space
+    "‌"  # zero-width non-joiner
+    "‍"  # zero-width joiner
+    "﻿"  # zero-width no-break space (BOM)
+    "­"  # soft hyphen
+)
+_ZERO_WIDTH_RE = re.compile(f"[{re.escape(_ZERO_WIDTH_CHARS)}]")
+
+# Soft-hyphen and regular hyphen used to split words ("ig-nore pre-vious")
+# Match hyphens that appear between word characters (not at word boundaries)
+_SPLIT_HYPHEN_RE = re.compile(r"(?<=[a-zA-Z])-(?=[a-zA-Z])")
+
+# Collapse multiple whitespace runs to a single space
+_WHITESPACE_RE = re.compile(r"\s+")
+
+# Base64 token detector: ≥16 chars using the standard or URL-safe Base64 alphabet,
+# optionally padded, followed by a non-base64 char or end of string.
+_BASE64_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{16,}(?![A-Za-z0-9+/=_-])")
+
+
+def _normalize_for_injection_scan(text: str) -> str:
+    """
+    Normalize text before applying injection regex patterns.
+
+    Pipeline:
+    1. HTML entity decode (bounded 3-pass fixpoint) — catches entity-encoded
+       payloads like ``&lt;|im_start|&gt;`` on the tool call args path where
+       normalize_for_scan() is NOT called upstream.
+    2. Strip Unicode bidi override/embedding/isolate formatting characters
+       (U+202A–U+202E, U+2066–U+2069) — these survive NFKC and can interleave
+       letters to break keyword regexes (e.g. ig[RLO]nore).
+    3. Strip zero-width characters (used to split keywords invisibly)
+    4. Remove intra-word soft hyphens / hyphens (split-word bypass)
+    5. Collapse whitespace runs to single spaces
+    6. NFKC normalization (Unicode lookalikes)
+    """
+    # Step 1: bounded HTML entity decode — same 3-pass fixpoint loop as
+    # normalize_for_scan(); additional bidi/zero-width/hyphen steps follow.
+    for _ in range(3):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    # Step 2: strip bidi formatting characters
+    text = BIDI_CHARS_RE.sub("", text)
+    # Step 3: strip zero-width chars
+    text = _ZERO_WIDTH_RE.sub("", text)
+    # Step 4: remove intra-word hyphens ("ig-nore" → "ignore")
+    text = _SPLIT_HYPHEN_RE.sub("", text)
+    # Step 5: collapse whitespace
+    text = _WHITESPACE_RE.sub(" ", text).strip()
+    # Step 6: NFKC
+    return unicodedata.normalize("NFKC", text)
+
+
+_BASE64_MAX_MATCHES = 8  # cap: at most 8 tokens decoded per call (Fix 4 DoS guard)
+_BASE64_MAX_DECODED_CHARS = 512  # total decoded surface budget per call
+
+
+def _try_decode_base64_tokens(text: str) -> str | None:
+    """
+    If text contains any Base64-looking token (≥16 chars, valid B64 alphabet,
+    decodable to valid UTF-8), return the decoded text to be appended to the
+    scan surface.  Returns None if no decodable token is found.
+
+    Fix 4 (CPU DoS): text MUST already be truncated to _MAX_SCAN_LEN by the
+    caller. We additionally cap to _BASE64_MAX_MATCHES matches and
+    _BASE64_MAX_DECODED_CHARS of decoded surface to bound decode work.
+    """
+    decoded_parts: list[str] = []
+    budget = _BASE64_MAX_DECODED_CHARS
+    for match in itertools.islice(_BASE64_TOKEN_RE.finditer(text), _BASE64_MAX_MATCHES):
+        token = match.group(0)
+        # Try standard and URL-safe variants with and without padding
+        for variant in (token, token.replace("-", "+").replace("_", "/")):
+            padded = variant + "=" * ((-len(variant)) % 4)
+            try:
+                decoded_bytes = base64.b64decode(padded, validate=False)
+                decoded_str = decoded_bytes.decode("utf-8")
+                if len(decoded_str) <= budget:
+                    decoded_parts.append(decoded_str)
+                    budget -= len(decoded_str)
+                else:
+                    # Append only up to remaining budget
+                    decoded_parts.append(decoded_str[:budget])
+                    budget = 0
+                break  # found a decodable form
+            except Exception:
+                continue
+        if budget <= 0:
+            break  # decoded surface budget exhausted
+    return " ".join(decoded_parts) if decoded_parts else None
 
 
 # ---------------------------------------------------------------------------
@@ -50,12 +155,12 @@ _CORE_PATTERNS: tuple[str, ...] = (
 # OWASP LLM Top 10 A01 prompt injection patterns — applied to tool call arguments
 # These cover the most common real-world prompt injection vectors seen in wild (2024-2025).
 _OWASP_CALL_ARG_PATTERNS: tuple[str, ...] = (
-    r"(?i)ignore\s+previous\s+instructions?",   # OWASP LLM01-A01
-    r"(?i)ignore\s+all\s+previous\b",           # OWASP LLM01-A02 (broader than A01)
-    r"(?i)disregard\s+your\s+instructions?",    # OWASP LLM01-A03
-    r"(?i)you\s+are\s+now\b",                   # OWASP LLM01-A04 (role override preamble)
-    r"(?i)new\s+instructions?:",                # OWASP LLM01-A05
-    r"(?i)system\s+prompt:",                    # OWASP LLM01-A06
+    r"(?i)ignore\s+previous\s+instructions?",  # OWASP LLM01-A01
+    r"(?i)ignore\s+all\s+previous\b",  # OWASP LLM01-A02 (broader than A01)
+    r"(?i)disregard\s+your\s+instructions?",  # OWASP LLM01-A03
+    r"(?i)you\s+are\s+now\b",  # OWASP LLM01-A04 (role override preamble)
+    r"(?i)new\s+instructions?:",  # OWASP LLM01-A05
+    r"(?i)system\s+prompt:",  # OWASP LLM01-A06
 )
 
 _ALL_PATTERNS: tuple[str, ...] = _CORE_PATTERNS + _OWASP_CALL_ARG_PATTERNS
@@ -90,12 +195,38 @@ class BoundaryEngine:
         return [re.compile(p) for p in _ALL_PATTERNS]
 
     def _scan(self, text: str) -> str | None:
-        """Return the matched pattern string, or None."""
-        if len(text) > _MAX_SCAN_LEN:
-            text = text[:_MAX_SCAN_LEN]
-        for pattern in self._compiled:
-            if pattern.search(text):
-                return pattern.pattern
+        """
+        Return the matched pattern string, or None.
+
+        Scans both:
+        1. The original text (catches obvious patterns)
+        2. A normalized copy (catches split-word, zero-width, hyphenated bypasses)
+        3. Any Base64-decoded content found in the text (catches encoded payloads)
+        """
+        # Run on original text first
+        scan_candidates = [text[:_MAX_SCAN_LEN] if len(text) > _MAX_SCAN_LEN else text]
+
+        # Build normalized form and add if it differs from original
+        normalized = _normalize_for_injection_scan(text)
+        if len(normalized) > _MAX_SCAN_LEN:
+            normalized = normalized[:_MAX_SCAN_LEN]
+        if normalized != scan_candidates[0]:
+            scan_candidates.append(normalized)
+
+        # Add Base64-decoded surface if any token decodes to valid UTF-8.
+        # Fix 4: pass the already-truncated scan_candidates[0] so the regex
+        # never runs over more than _MAX_SCAN_LEN bytes of text.
+        decoded = _try_decode_base64_tokens(scan_candidates[0])
+        if decoded:
+            decoded_norm = _normalize_for_injection_scan(decoded)
+            scan_candidates.append(
+                decoded_norm[:_MAX_SCAN_LEN] if len(decoded_norm) > _MAX_SCAN_LEN else decoded_norm
+            )
+
+        for candidate in scan_candidates:
+            for pattern in self._compiled:
+                if pattern.search(candidate):
+                    return pattern.pattern
         return None
 
     def _scan_values(self, obj: Any) -> str | None:

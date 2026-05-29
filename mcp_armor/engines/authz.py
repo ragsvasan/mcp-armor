@@ -36,39 +36,41 @@ from ..types import CONTENT_BEARING_METHODS, MCPRequest, MCPResponse
 # uses subscriptions, progress, cancellation, sampling, elicitation or
 # roots. Adding a new standard MCP method in a future protocol revision
 # requires extending this set (or CONTENT_BEARING_METHODS for invocations).
-_AUTHZ_PASSTHROUGH_METHODS: frozenset[str] = frozenset({
-    # Lifecycle / handshake
-    "initialize",
-    "notifications/initialized",
-    "ping",
-    # Capability discovery (read-only listings)
-    "tools/list",
-    "resources/list",
-    "resources/templates/list",
-    "prompts/list",
-    "completion/complete",
-    "logging/setLevel",
-    # Resource subscription teardown — paired with resources/subscribe
-    # (which is a CONTENT_BEARING_METHOD). Unsubscribe carries no resource
-    # content, only a uri reference to stop notifications for.
-    "resources/unsubscribe",
-    # Roots (client-exposed filesystem roots) — listing + change notify
-    "roots/list",
-    "notifications/roots/list_changed",
-    # Server-initiated sampling / elicitation requests (LLM/user round-trips,
-    # not tool/resource invocations on this server)
-    "sampling/createMessage",
-    "elicitation/create",
-    # Control / progress / log notification frames
-    "notifications/cancelled",
-    "notifications/progress",
-    "notifications/message",
-    # Server-initiated list-changed notifications
-    "notifications/resources/list_changed",
-    "notifications/resources/updated",
-    "notifications/tools/list_changed",
-    "notifications/prompts/list_changed",
-})
+_AUTHZ_PASSTHROUGH_METHODS: frozenset[str] = frozenset(
+    {
+        # Lifecycle / handshake
+        "initialize",
+        "notifications/initialized",
+        "ping",
+        # Capability discovery (read-only listings)
+        "tools/list",
+        "resources/list",
+        "resources/templates/list",
+        "prompts/list",
+        "completion/complete",
+        "logging/setLevel",
+        # Resource subscription teardown — paired with resources/subscribe
+        # (which is a CONTENT_BEARING_METHOD). Unsubscribe carries no resource
+        # content, only a uri reference to stop notifications for.
+        "resources/unsubscribe",
+        # Roots (client-exposed filesystem roots) — listing + change notify
+        "roots/list",
+        "notifications/roots/list_changed",
+        # Server-initiated sampling / elicitation requests (LLM/user round-trips,
+        # not tool/resource invocations on this server)
+        "sampling/createMessage",
+        "elicitation/create",
+        # Control / progress / log notification frames
+        "notifications/cancelled",
+        "notifications/progress",
+        "notifications/message",
+        # Server-initiated list-changed notifications
+        "notifications/resources/list_changed",
+        "notifications/resources/updated",
+        "notifications/tools/list_changed",
+        "notifications/prompts/list_changed",
+    }
+)
 
 if TYPE_CHECKING:
     from ..config import ToolPolicy
@@ -176,20 +178,39 @@ class AuthzEngine:
 
     def __init__(
         self,
-        tool_policies: dict[str, "ToolPolicy"] | None = None,
+        tool_policies: dict[str, ToolPolicy] | None = None,
         default_deny: bool = True,
         destructive_token_ttl_seconds: int = 60,
         echo_confirm_token: bool = False,
     ) -> None:
         self._policies: dict[str, ToolPolicy] = tool_policies or {}  # type: ignore[assignment]
         self._default_deny = default_deny
-        # F9 fix: by default the destructive-confirmation token is NOT echoed
-        # back in the client-facing error. Returning it to the same automated
-        # channel lets an unattended LLM agent parse and auto-resubmit it,
-        # which fully defeats the two-stage human-in-the-loop gate. With this
-        # off, the token is logged server-side (WARNING) for an out-of-band
-        # operator/step-up flow. Set echo_confirm_token=True only for
-        # interactive/human clients where auto-resubmit is not a concern.
+        # echo_confirm_token PARADOX — read before changing this default:
+        #
+        # This setting has an irresolvable security paradox:
+        #
+        #   echo_confirm_token=False (default): the confirmation token is written
+        #   to the server log (WARNING level) and NOT returned in the error body.
+        #   Human operators can retrieve it out-of-band and re-submit.  However,
+        #   clients that cannot read server logs (most HTTP clients, LLM agents)
+        #   have no way to complete the two-stage flow — the gate is effectively
+        #   broken for them.
+        #
+        #   echo_confirm_token=True: the confirmation token IS included in the
+        #   JSON-RPC error body returned to the client.  This allows the flow to
+        #   complete for any client, BUT autonomous LLM agents that can read their
+        #   own error messages will parse the token and auto-resubmit it on the
+        #   very next call — fully defeating the human-in-the-loop gate.
+        #
+        # CONCLUSION: the destructive gate is only meaningful for deployments
+        # where the client routes the error through a human approval step before
+        # the token is returned to the agent (e.g. a UI "Are you sure?" dialog
+        # that intercepts the error before the agent sees it).
+        # For fully autonomous agent clients, this gate provides no protection
+        # regardless of this setting.  Pair with RFC 9470 step-up authentication
+        # or an out-of-band approval workflow for real human-in-the-loop control.
+        #
+        # See: docs/SECURITY.md § "Destructive Tool Gate — Known Limitations"
         self._echo_confirm_token = echo_confirm_token
         self._token_store = _TokenStore(destructive_token_ttl_seconds)
         log.warning(
@@ -226,9 +247,7 @@ class AuthzEngine:
         # Default deny — tool has no policy entry
         if policy is None:
             if self._default_deny:
-                raise AuthorizationError(
-                    f"Tool '{tool_name}' not in policy — denied (T2-001)"
-                )
+                raise AuthorizationError(f"Tool '{tool_name}' not in policy — denied (T2-001)")
             return ctx
 
         # T2-001: required_scopes subset check — policy.required_scopes ⊆ ctx.scopes
@@ -236,8 +255,7 @@ class AuthzEngine:
         if required and not required.issubset(set(ctx.scopes)):
             missing = sorted(required - set(ctx.scopes))
             raise AuthorizationError(
-                f"Caller lacks required scopes for '{tool_name}': "
-                f"missing {missing} (T2-001)"
+                f"Caller lacks required scopes for '{tool_name}': missing {missing} (T2-001)"
             )
 
         # T2-002: confused deputy — user_only tool called without a user identity.
@@ -270,9 +288,7 @@ class AuthzEngine:
         # Token is keyed by (session_id, tool_name) — prevents cross-tool replay.
         if policy.destructive:
             args = req.params.get("arguments", {})
-            confirm_token = (
-                args.get("_confirm_token") if isinstance(args, dict) else None
-            )
+            confirm_token = args.get("_confirm_token") if isinstance(args, dict) else None
             if not confirm_token:
                 token = self._token_store.issue(ctx.session_id, tool_name)
                 if self._echo_confirm_token:
@@ -287,7 +303,9 @@ class AuthzEngine:
                 log.warning(
                     "Destructive tool %r confirmation token issued for session "
                     "%s (out-of-band delivery; not echoed to client): %s",
-                    tool_name, ctx.session_id, token,
+                    tool_name,
+                    ctx.session_id,
+                    token,
                 )
                 raise AuthorizationError(
                     f"Tool '{tool_name}' is destructive and requires explicit "

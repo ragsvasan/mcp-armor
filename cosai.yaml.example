@@ -1,5 +1,18 @@
 version: 1
 
+# ---------------------------------------------------------------------------
+# dry_run — NOT FOR PRODUCTION
+# ---------------------------------------------------------------------------
+# When true, all CoSAI violations are caught and logged at WARNING level but
+# the request is allowed to proceed unchanged.  The audit log still records
+# the event, tagged with "dry_run": true.
+#
+# Use this ONLY during initial config tuning to see what would be blocked
+# without actually blocking traffic.  NEVER enable in production: it disables
+# all enforcement while keeping the appearance of protection.
+#
+# dry_run: false   # default — enforcement is active
+
 threats:
   T1:
     enabled: true
@@ -13,6 +26,28 @@ threats:
     tool_policies:
       query_db:    [read:public]
       admin_reset: [admin]
+
+    # ---------------------------------------------------------------------------
+    # echo_confirm_token — SECURITY PARADOX: read before enabling
+    # ---------------------------------------------------------------------------
+    # This setting has an irresolvable tradeoff for the destructive-tool gate:
+    #
+    #   false (default): the confirmation token is server-log-only. Human
+    #   operators can retrieve it out-of-band and re-submit. Clients that
+    #   cannot read server logs (most agents) cannot complete the flow.
+    #
+    #   true: the token IS returned in the JSON-RPC error body. This lets the
+    #   flow complete for all clients, BUT autonomous LLM agents that can read
+    #   their own error messages will parse the token and auto-resubmit on the
+    #   very next call — fully defeating the human-in-the-loop gate.
+    #
+    # The gate is only meaningful for deployments where the client routes the
+    # error through a human approval step BEFORE the token reaches the agent
+    # (e.g. a UI "Are you sure?" dialog). For fully autonomous agent clients,
+    # pair with RFC 9470 step-up authentication or an out-of-band workflow.
+    # See: docs/SECURITY.md § "Destructive Tool Gate — Known Limitations"
+    #
+    # echo_confirm_token: false   # default
 
   T3:
     enabled: true
@@ -64,3 +99,21 @@ threats:
     path: /var/log/mcp-armor/audit.jsonl
     log_params_as_digest: true
     chain_verify_on_startup: true
+    # ---------------------------------------------------------------------------
+    # ARMOR_AUDIT_HMAC_KEY (environment variable — not stored in this file)
+    # ---------------------------------------------------------------------------
+    # Set this environment variable to a hex-encoded 32+ byte secret to enable
+    # HMAC signing of each audit chain link.  When set, every record gains a
+    # "chain_hmac" field that is unforgeable without the key.
+    #
+    # Without this key, the hash chain can be truncated and recalculated by
+    # anyone with write access to the log file — erasing evidence without
+    # detection.  With the key, recalculating is computationally infeasible
+    # without possessing the secret.
+    #
+    # Generate a key:
+    #   python -c "import secrets; print(secrets.token_hex(32))"
+    #
+    # Production deployments MUST set ARMOR_AUDIT_HMAC_KEY.
+    # Store it in your secret manager (Vault, AWS Secrets Manager, etc.),
+    # NOT in this config file or in source control.

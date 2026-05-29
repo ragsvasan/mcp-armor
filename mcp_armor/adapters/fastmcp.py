@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def wrap_fastmcp(app: Any, guard: "CoSAIGuard") -> Any:
+def wrap_fastmcp(app: Any, guard: CoSAIGuard) -> Any:
     """
     Wrap a FastMCP application with mcp-armor protection.
 
@@ -51,9 +51,7 @@ def wrap_fastmcp(app: Any, guard: "CoSAIGuard") -> Any:
 
     # FIX-3: require a real FastMCP instance — reject duck-typed lookalikes
     if not isinstance(app, fastmcp.FastMCP):
-        raise TypeError(
-            f"wrap_fastmcp requires a fastmcp.FastMCP instance, got {type(app)!r}"
-        )
+        raise TypeError(f"wrap_fastmcp requires a fastmcp.FastMCP instance, got {type(app)!r}")
 
     from .fastapi import ArmorMiddleware
 
@@ -89,7 +87,7 @@ class _GuardedToolDispatcher:
     that would create two independent session entries per call.
     """
 
-    def __init__(self, guard: "CoSAIGuard") -> None:
+    def __init__(self, guard: CoSAIGuard) -> None:
         self._guard = guard
 
     def hook(self, fn: Any, transport: str = "stdio") -> Any:
@@ -104,15 +102,21 @@ class _GuardedToolDispatcher:
 
         @functools.wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            from ..types import MCPRequest, MCPResponse
-            from ..context import CoSAIContext, set_context
             from types import MappingProxyType
+
+            from ..context import CoSAIContext, set_context
+            from ..types import MCPRequest, MCPResponse
 
             # FIX-2: use caller-supplied transport, not hardcoded "stdio"
             # Stateless signed token so SessionEngine.verify() accepts it.
             session_id = self._guard.mint_session_id(transport)
             ctx = CoSAIContext.new(session_id, transport=transport)
             set_context(ctx)
+            # Fix 10: propagate ctx to _armor_active_ctx so @guard.protect
+            # decorators on tools dispatched through this path see real scopes.
+            from ..guard import _active_ctx as _armor_active_ctx_fmcp
+
+            _armor_active_ctx_fmcp.set(ctx)
 
             tool_name = fn.__name__
             req = MCPRequest(
@@ -131,9 +135,11 @@ class _GuardedToolDispatcher:
                 ctx = await self._guard.open_session(ctx)
                 session_opened = True
                 set_context(ctx)
+                _armor_active_ctx_fmcp.set(ctx)  # Fix 10: keep active_ctx in sync
 
                 ctx = await self._guard._run_request(ctx, req)
                 set_context(ctx)
+                _armor_active_ctx_fmcp.set(ctx)  # Fix 10: keep active_ctx in sync
 
                 result = await fn(*args, **kwargs)
 

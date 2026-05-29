@@ -65,6 +65,68 @@ The following are known limitations, not vulnerabilities. They are documented he
 
 ---
 
+## Destructive Tool Gate — Known Limitations
+
+The `T2` destructive-tool gate (`destructive: true` in `tool_policies`) uses a
+two-stage commit pattern: the first call returns an error with a one-time
+confirmation token; the second call re-submits with that token.
+
+**This gate has an irresolvable paradox depending on the `echo_confirm_token` setting:**
+
+### `echo_confirm_token: false` (default)
+The confirmation token is written to the server log at `WARNING` level and is
+**not** returned in the client-facing error body.  A human operator can retrieve
+the token out-of-band and re-submit on behalf of the caller.
+
+**Problem:** clients that cannot read server logs (the overwhelming majority of
+LLM agent deployments) have no way to complete the two-stage flow — the gate
+is effectively broken for them.
+
+### `echo_confirm_token: true`
+The confirmation token **is** returned in the JSON-RPC error body.  Any client
+that can read its own error messages can complete the flow.
+
+**Problem:** autonomous LLM agents can and will parse the token from the error
+response and auto-resubmit it on the very next call, completing the two-stage
+flow without any human involvement — fully defeating the gate.
+
+### Conclusion
+
+**The destructive tool gate is only meaningful for deployments where the client
+routes the error response through a human approval step BEFORE the token reaches
+the agent.** For example:
+- A UI that intercepts the `AuthorizationError`, shows an "Are you sure?" dialog
+  to the user, and only forwards the token to the agent after human approval.
+- An RFC 9470 step-up authentication challenge that requires a second factor.
+- An out-of-band approval workflow (e.g. a Slack approval bot) triggered by the
+  server log token.
+
+**For fully autonomous agent clients with no human-in-the-loop intercept, this
+gate provides no protection regardless of the `echo_confirm_token` setting.**
+
+---
+
+## Audit Log HMAC Signing
+
+By default, the T12 audit chain uses SHA-256 hash chaining.  This detects
+in-place field tampering but does NOT prevent a sophisticated attacker who has
+write access to the log from truncating it and recalculating all chain hashes
+from scratch — erasing evidence without detection.
+
+**To close this gap, set the `ARMOR_AUDIT_HMAC_KEY` environment variable** to a
+hex-encoded 32+ byte secret (generate with `python -c "import secrets; print(secrets.token_hex(32))"`).
+
+When set, every audit record gains a `chain_hmac` field computed as
+`HMAC-SHA256(key, canonical_JSON_bytes)`.  Recalculating the chain after
+truncation without the key is computationally infeasible.
+
+Store the key in your secret manager (Vault, AWS Secrets Manager, GCP Secret
+Manager, etc.).  **Do not store it in `cosai.yaml` or source control.**
+
+**Production deployments MUST set `ARMOR_AUDIT_HMAC_KEY`.**
+
+---
+
 ## Supported Versions
 
 | Version | Supported |
