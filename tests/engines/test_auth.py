@@ -19,10 +19,10 @@ from mcp_armor.engines.auth import AuthEngine, _JTICache, _jwk_thumbprint  # noq
 from mcp_armor.exceptions import AuthenticationError  # noqa: E402
 from tests.conftest import make_ctx, make_request  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
 
 def _hmac_key():
     return OctKey.generate_key(256)
@@ -121,6 +121,7 @@ def _auth_req(
 # _JTICache — time-based eviction
 # ---------------------------------------------------------------------------
 
+
 def test_jti_cache_new_jti_accepted():
     cache = _JTICache(10)
     assert cache.check_and_add("abc", time.time() + 3600) is True
@@ -160,6 +161,7 @@ def test_regression_jti_cache_full_raises_not_evicts():
 # FIX[1] regression: jwks=None must be refused (fail-closed)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_auth_refuses_when_jwks_unconfigured():
     """jwks=None must raise AuthenticationError on any token, not silently accept."""
@@ -167,9 +169,15 @@ async def test_regression_auth_refuses_when_jwks_unconfigured():
     ctx = make_ctx()
     # Build a minimal syntactically valid JWT with no signature
     header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
-    payload = base64.urlsafe_b64encode(
-        json.dumps({"sub": "x", "exp": int(time.time()) + 3600, "iat": int(time.time())}).encode()
-    ).rstrip(b"=").decode()
+    payload = (
+        base64.urlsafe_b64encode(
+            json.dumps(
+                {"sub": "x", "exp": int(time.time()) + 3600, "iat": int(time.time())}
+            ).encode()
+        )
+        .rstrip(b"=")
+        .decode()
+    )
     token = f"{header}.{payload}."
     req = _auth_req(token)
     with pytest.raises(AuthenticationError, match="No JWKS configured"):
@@ -186,6 +194,7 @@ async def test_regression_startup_raises_when_jwks_absent():
 # ---------------------------------------------------------------------------
 # T1-001: Missing / malformed Authorization header
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_missing_auth_header_raises():
@@ -218,6 +227,7 @@ async def test_unknown_scheme_raises():
 # JWT verification
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_valid_signed_jwt_passes():
     engine, key = _engine()
@@ -231,7 +241,7 @@ async def test_valid_signed_jwt_passes():
 @pytest.mark.asyncio
 async def test_regression_invalid_signature_raises():
     engine, _ = _engine(key=_hmac_key())  # engine uses key1
-    wrong_key = _hmac_key()               # token signed with key2
+    wrong_key = _hmac_key()  # token signed with key2
     ctx = make_ctx()
     token = _signed_jwt(_now_claims(), wrong_key)
     req = _auth_req(token)
@@ -275,11 +285,14 @@ async def test_missing_exp_raises():
 async def test_regression_token_too_old_raises():
     engine, key = _engine(token_expiry_max_secs=10)
     ctx = make_ctx()
-    token = _signed_jwt({
-        **_now_claims(),
-        "iat": int(time.time()) - 100,
-        "exp": int(time.time()) + 3600,
-    }, key)
+    token = _signed_jwt(
+        {
+            **_now_claims(),
+            "iat": int(time.time()) - 100,
+            "exp": int(time.time()) + 3600,
+        },
+        key,
+    )
     req = _auth_req(token)
     with pytest.raises(AuthenticationError, match="issued too long ago"):
         await engine.on_request(ctx, req)
@@ -320,6 +333,7 @@ async def test_audience_list_containing_expected_passes():
 # The engine now always verifies sig (no unsigned path), so iss/aud always run.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_iss_aud_always_enforced():
     """iss/aud checks must run regardless of whether sig verification path was taken."""
@@ -336,6 +350,7 @@ async def test_regression_iss_aud_always_enforced():
 # FIX[13] regression: malformed exp/iat claims must be 401, not 500
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_malformed_exp_claim_returns_auth_error():
     """exp='never' must raise AuthenticationError, not TypeError."""
@@ -350,6 +365,7 @@ async def test_regression_malformed_exp_claim_returns_auth_error():
 # ---------------------------------------------------------------------------
 # T1-002: JTI replay
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_jti_replay_raises():
@@ -367,6 +383,7 @@ async def test_regression_jti_replay_raises():
 # ---------------------------------------------------------------------------
 # T1-003: Session binding
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_cross_session_token_reuse_rejected():
@@ -395,6 +412,7 @@ async def test_token_with_matching_sid_passes():
 # ---------------------------------------------------------------------------
 # T1-004: DPoP validation
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_dpop_required_but_absent_raises():
@@ -426,6 +444,7 @@ async def test_dpop_valid_proof_passes():
         require_dpop=True,
         jwks=_hmac_jwks(key),
         endpoint_uri="https://example.com/mcp",
+        require_cnf_binding=False,  # isolate proof validity from cnf-binding gate
     )
     ctx = make_ctx()
     token = _signed_jwt(_now_claims(), key)
@@ -437,7 +456,7 @@ async def test_dpop_valid_proof_passes():
 
 @pytest.mark.asyncio
 async def test_regression_dpop_wrong_typ_raises():
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     proof = _dpop_proof(token, ec_key, typ="JWT")
@@ -448,7 +467,7 @@ async def test_regression_dpop_wrong_typ_raises():
 
 @pytest.mark.asyncio
 async def test_regression_dpop_stale_iat_raises():
-    engine, key = _engine(dpop_max_age_secs=30)
+    engine, key = _engine(dpop_max_age_secs=30, require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     proof = _dpop_proof(token, ec_key, iat=int(time.time()) - 120)
@@ -460,7 +479,9 @@ async def test_regression_dpop_stale_iat_raises():
 @pytest.mark.asyncio
 async def test_regression_dpop_iat_future_window_capped_at_skew():
     """Proof with iat > now + dpop_future_skew_secs must be rejected."""
-    engine, key = _engine(dpop_max_age_secs=30, dpop_future_skew_secs=5)
+    engine, key = _engine(
+        dpop_max_age_secs=30, dpop_future_skew_secs=5, require_cnf_binding=False
+    )
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     proof = _dpop_proof(token, ec_key, iat=int(time.time()) + 25)
@@ -471,7 +492,7 @@ async def test_regression_dpop_iat_future_window_capped_at_skew():
 
 @pytest.mark.asyncio
 async def test_regression_dpop_jti_replay_raises():
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     ec_key = _ec_keypair()
     dpop_jti = str(uuid.uuid4())
 
@@ -487,7 +508,7 @@ async def test_regression_dpop_jti_replay_raises():
 
 @pytest.mark.asyncio
 async def test_regression_dpop_ath_mismatch_raises():
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     wrong_ath = _b64url_encode(hashlib.sha256(b"wrong").digest())
@@ -499,7 +520,7 @@ async def test_regression_dpop_ath_mismatch_raises():
 
 @pytest.mark.asyncio
 async def test_regression_dpop_private_key_in_header_raises():
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     proof = _dpop_proof(token, ec_key, embed_private=True)
@@ -511,7 +532,7 @@ async def test_regression_dpop_private_key_in_header_raises():
 @pytest.mark.asyncio
 async def test_regression_dpop_htm_mismatch_raises():
     """DPoP htm must match the fixed transport method (POST); GET proof is rejected."""
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     proof = _dpop_proof(token, ec_key, htm="GET")
@@ -527,6 +548,7 @@ async def test_regression_dpop_htu_mismatch_raises():
         require_dpop=True,
         jwks=_hmac_jwks(key),
         endpoint_uri="https://example.com/mcp",
+        require_cnf_binding=False,  # isolate htu binding from cnf-binding gate
     )
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
@@ -539,6 +561,7 @@ async def test_regression_dpop_htu_mismatch_raises():
 # ---------------------------------------------------------------------------
 # FIX[3] regression: cnf.jkt thumbprint binding
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_dpop_jkt_thumbprint_must_match_cnf():
@@ -578,6 +601,7 @@ async def test_dpop_jkt_matching_thumbprint_passes():
 # FIX[4] regression: cnf.jkt in token forces DPoP mandatory
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_cnf_jkt_token_requires_dpop_proof():
     """Token with cnf.jkt must require DPoP even when require_dpop=False."""
@@ -593,13 +617,83 @@ async def test_regression_cnf_jkt_token_requires_dpop_proof():
 
 
 # ---------------------------------------------------------------------------
+# RFC 9449 §4.3 regression: when DPoP is in force the access token MUST be
+# sender-constrained (carry cnf.jkt). A valid proof against an unbound token is
+# never bound to it, so a stolen non-bound token could be replayed with any
+# attacker-minted proof. Fail closed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_regression_dpop_without_cnf_jkt_rejected():
+    """require_dpop=True + valid proof but token lacks cnf.jkt → rejected."""
+    key = _hmac_key()
+    ec_key = _ec_keypair()
+    engine = AuthEngine(
+        require_dpop=True,
+        jwks=_hmac_jwks(key),
+        endpoint_uri="https://example.com/mcp",
+    )
+    token = _signed_jwt(_now_claims(), key)  # no cnf claim
+    proof = _dpop_proof(token, ec_key, htu="https://example.com/mcp")
+    req = _auth_req(token, scheme="DPoP", dpop=proof)
+    with pytest.raises(AuthenticationError, match="cnf.jkt|4.3"):
+        await engine.on_request(make_ctx(), req)
+
+
+@pytest.mark.asyncio
+async def test_regression_dpop_proof_without_cnf_jkt_rejected_even_if_not_required():
+    """A presented DPoP proof against an unbound token is rejected even when
+    require_dpop=False — the proof implies an (illusory) binding guarantee."""
+    key = _hmac_key()
+    ec_key = _ec_keypair()
+    engine = AuthEngine(require_dpop=False, jwks=_hmac_jwks(key))
+    token = _signed_jwt(_now_claims(), key)  # no cnf claim
+    proof = _dpop_proof(token, ec_key)
+    req = _auth_req(token, scheme="DPoP", dpop=proof)
+    with pytest.raises(AuthenticationError, match="cnf.jkt|4.3"):
+        await engine.on_request(make_ctx(), req)
+
+
+@pytest.mark.asyncio
+async def test_dpop_without_cnf_jkt_accepted_when_binding_opt_out():
+    """require_cnf_binding=False is the explicit accepted-risk opt-out."""
+    key = _hmac_key()
+    ec_key = _ec_keypair()
+    engine = AuthEngine(
+        require_dpop=True,
+        jwks=_hmac_jwks(key),
+        endpoint_uri="https://example.com/mcp",
+        require_cnf_binding=False,
+    )
+    token = _signed_jwt(_now_claims(), key)  # no cnf claim
+    proof = _dpop_proof(token, ec_key, htu="https://example.com/mcp")
+    req = _auth_req(token, scheme="DPoP", dpop=proof)
+    new_ctx = await engine.on_request(make_ctx(), req)
+    assert new_ctx.user_id == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_regression_bearer_no_dpop_cnf_gate_not_triggered():
+    """Plain Bearer flow (no DPoP in force) must be untouched by the cnf gate:
+    require_cnf_binding=True default, require_dpop=False, no DPoP header, token
+    without cnf.jkt → accepted."""
+    engine, key = _engine(require_dpop=False)  # require_cnf_binding defaults True
+    token = _signed_jwt(_now_claims(), key)  # no cnf claim
+    req = _auth_req(token, scheme="Bearer")  # no DPoP header
+    new_ctx = await engine.on_request(make_ctx(), req)
+    assert new_ctx.user_id == "user-1"
+
+
+# ---------------------------------------------------------------------------
 # FIX[5] regression: htm must use transport method, not client-supplied header
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_dpop_htm_not_taken_from_client_header():
     """x-mcp-http-method header from client must NOT influence htm validation."""
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     # Proof says GET — attacker also sets x-mcp-http-method: GET hoping to match
@@ -619,6 +713,7 @@ async def test_regression_dpop_htm_not_taken_from_client_header():
 # FIX[11] regression: Bearer scheme with DPoP proof must be rejected
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_bearer_scheme_with_dpop_proof_rejected():
     """Authorization: Bearer + DPoP header together must be rejected (RFC 9449 §7.1)."""
@@ -635,12 +730,13 @@ async def test_regression_bearer_scheme_with_dpop_proof_rejected():
 # FIX[14] regression: weak RSA DPoP key must be rejected
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_dpop_weak_rsa_key_rejected():
     """DPoP proof signed with an RSA key below 2048 bits must be rejected."""
     from joserfc.jwk import RSAKey
 
-    engine, key = _engine()
+    engine, key = _engine(require_cnf_binding=False)
     token = _signed_jwt(_now_claims(), key)
 
     rsa_key = RSAKey.generate_key(1024, private=True)  # deliberately weak
@@ -665,8 +761,47 @@ async def test_regression_dpop_weak_rsa_key_rejected():
 
 
 # ---------------------------------------------------------------------------
+# C2 regression (AUDIT_2026-06-12): malformed RSA modulus must be REJECTED, not
+# silently skipped. _check_rsa_key_size previously did `except Exception: return`,
+# letting an attacker bypass the NIST key-size floor with an undecodable `n`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_regression_c2_dpop_malformed_rsa_modulus_rejected():
+    """DPoP proof embedding an RSA JWK whose `n` cannot be base64-decoded must
+    be rejected (fail closed), not skipped."""
+    engine, key = _engine(require_cnf_binding=False)
+    token = _signed_jwt(_now_claims(), key)
+
+    # Sign the proof with a real key, but advertise a malformed modulus in the
+    # embedded JWK header — _check_rsa_key_size runs on the header before the
+    # signature is verified, so the malformed `n` is what gets rejected.
+    from joserfc.jwk import RSAKey
+
+    signing_key = RSAKey.generate_key(2048, private=True)
+    bad_jwk = {"kty": "RSA", "n": "A", "e": "AQAB"}  # "A" -> invalid b64 length
+    claims_body = {
+        "htm": "POST",
+        "htu": "https://example.com/mcp",
+        "iat": int(time.time()),
+        "jti": str(uuid.uuid4()),
+        "ath": _ath(token),
+    }
+    proof = jose_jwt.encode(
+        {"alg": "RS256", "typ": "dpop+jwt", "jwk": bad_jwk},
+        claims_body,
+        signing_key,
+    )
+    req = _auth_req(token, scheme="DPoP", dpop=proof)
+    with pytest.raises(AuthenticationError, match="malformed|modulus|key size"):
+        await engine.on_request(make_ctx(), req)
+
+
+# ---------------------------------------------------------------------------
 # FIX[15] regression: error messages must not leak raw token content
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_auth_error_does_not_leak_token():
@@ -688,6 +823,7 @@ async def test_regression_auth_error_does_not_leak_token():
 # ---------------------------------------------------------------------------
 # FIX[16] regression: conflicting tenant claims must be rejected
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_conflicting_tenant_claims_rejected():
@@ -714,6 +850,7 @@ async def test_matching_tenant_claims_passes():
 # ---------------------------------------------------------------------------
 # Startup validation
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_startup_raises_if_dpop_required_and_no_endpoint_uri():

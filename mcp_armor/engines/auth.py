@@ -14,8 +14,9 @@ from ..exceptions import AuthenticationError
 from ..types import MCPRequest, MCPResponse
 
 # Asymmetric-only algorithms allowed for DPoP (RFC 9449 §4.2)
-_DPOP_ALLOWED_ALGS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS512",
-                                  "ES256", "ES384", "ES512", "EdDSA"})
+_DPOP_ALLOWED_ALGS = frozenset(
+    {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
+)
 
 # F8 fix: explicit algorithm allowlist for access-token verification. Never
 # rely on the JWT library's default — pin it so a downgraded/regressed
@@ -25,9 +26,14 @@ _DPOP_ALLOWED_ALGS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS
 # list closes the library-default gap. HS* is included because operators may
 # legitimately configure a symmetric `oct` JWKS; it is NEVER accepted against
 # an RSA/EC public key (joserfc key-type binding enforces that).
-_ACCESS_TOKEN_ALGS: list[str] = sorted(_DPOP_ALLOWED_ALGS | {
-    "HS256", "HS384", "HS512",
-})
+_ACCESS_TOKEN_ALGS: list[str] = sorted(
+    _DPOP_ALLOWED_ALGS
+    | {
+        "HS256",
+        "HS384",
+        "HS512",
+    }
+)
 _DPOP_ALGS_LIST: list[str] = sorted(_DPOP_ALLOWED_ALGS)
 
 # Minimum RSA modulus bits (NIST SP 800-131A)
@@ -96,6 +102,7 @@ def _parse_jwt_header(token: str) -> dict:
 def _import_jwk(jwk_data: dict) -> Any:
     """Import a single JWK dict into a joserfc key object."""
     from joserfc.jwk import ECKey, OctKey, RSAKey  # type: ignore[import]
+
     kty = jwk_data.get("kty")
     if kty == "EC":
         return ECKey.import_key(jwk_data)
@@ -135,8 +142,13 @@ def _check_rsa_key_size(jwk_data: dict) -> None:
         return
     try:
         modulus_bits = len(_b64url_decode(n_b64)) * 8
-    except Exception:
-        return
+    except Exception as exc:
+        # C2 fix: a key whose modulus cannot be decoded is malformed — fail
+        # closed (reject) rather than silently skipping the NIST size floor,
+        # which let an attacker bypass the check with a corrupt `n`.
+        raise AuthenticationError(
+            "DPoP RSA key modulus is malformed — cannot verify key size (NIST SP 800-131A)"
+        ) from exc
     if modulus_bits < _MIN_RSA_BITS:
         raise AuthenticationError(
             f"DPoP RSA key is {modulus_bits} bits — minimum is {_MIN_RSA_BITS} (NIST SP 800-131A)"
@@ -146,9 +158,7 @@ def _check_rsa_key_size(jwk_data: dict) -> None:
 def _require_int_claim(claims: dict, key: str) -> None:
     val = claims.get(key)
     if val is not None and not isinstance(val, (int, float)):
-        raise AuthenticationError(
-            f"JWT {key!r} claim must be numeric, got {type(val).__name__!r}"
-        )
+        raise AuthenticationError(f"JWT {key!r} claim must be numeric, got {type(val).__name__!r}")
 
 
 class AuthEngine:
@@ -172,6 +182,16 @@ class AuthEngine:
         If True, every request must include a DPoP proof header. Additionally,
         if an access token's `cnf.jkt` claim is present, DPoP is required
         regardless of this flag.
+    require_cnf_binding : bool
+        If True (default), whenever DPoP is in force for a request — either
+        because ``require_dpop=True`` or because the request carries a DPoP
+        proof — the access token MUST be sender-constrained, i.e. carry a
+        ``cnf.jkt`` claim (RFC 9449 §4.3). A DPoP proof presented against a
+        token without ``cnf.jkt`` is never bound to that token, so a stolen
+        non-bound token could be replayed with any attacker-minted proof. The
+        engine fails closed in that case. Set ``False`` only to accept
+        unbound access tokens under DPoP (not recommended — defeats the
+        sender-constraint guarantee).
     endpoint_uri : str | None
         The canonical URI of this MCP endpoint. Required when require_dpop=True.
     """
@@ -188,8 +208,10 @@ class AuthEngine:
         dpop_max_age_secs: int = 30,
         dpop_future_skew_secs: int = 5,
         endpoint_uri: str | None = None,
+        require_cnf_binding: bool = True,
     ) -> None:
         self._require_dpop = require_dpop
+        self._require_cnf_binding = require_cnf_binding
         self._require_jti = require_jti
         self._token_expiry_max_secs = token_expiry_max_secs
         self._issuer = issuer
@@ -203,6 +225,7 @@ class AuthEngine:
 
     def _load_keys(self, jwks: dict) -> Any:
         from joserfc.jwk import KeySet  # type: ignore[import]
+
         if "keys" in jwks:
             return KeySet.import_key_set(jwks)
         return _import_jwk(jwks)
@@ -221,6 +244,7 @@ class AuthEngine:
 
         try:
             from joserfc import jwt  # type: ignore[import]
+
             # F8 fix: pin the algorithm allowlist explicitly — do not trust
             # the library default.
             obj = jwt.decode(token, self._key_set, algorithms=_ACCESS_TOKEN_ALGS)
@@ -324,6 +348,7 @@ class AuthEngine:
         try:
             proof_key = _import_jwk(jwk_data)
             from joserfc import jwt  # type: ignore[import]
+
             # F8 fix: pin to the asymmetric DPoP algorithm allowlist (already
             # validated against the header above; pinning here closes the
             # library-default gap if joserfc ever regresses).
@@ -342,9 +367,7 @@ class AuthEngine:
             raise AuthenticationError("DPoP proof missing iat claim")
         # Asymmetric window: past is bounded by dpop_max_age_secs, future by skew
         if (now - iat) > self._dpop_max_age_secs:
-            raise AuthenticationError(
-                f"DPoP proof iat too old (max {self._dpop_max_age_secs}s)"
-            )
+            raise AuthenticationError(f"DPoP proof iat too old (max {self._dpop_max_age_secs}s)")
         if (iat - now) > self._dpop_future_skew_secs:
             raise AuthenticationError(
                 f"DPoP proof iat too far in the future (max skew {self._dpop_future_skew_secs}s)"
@@ -359,9 +382,7 @@ class AuthEngine:
 
         htm = claims.get("htm", "")
         if htm.upper() != http_method.upper():
-            raise AuthenticationError(
-                f"DPoP htm mismatch: got {htm!r}, expected {http_method!r}"
-            )
+            raise AuthenticationError(f"DPoP htm mismatch: got {htm!r}, expected {http_method!r}")
 
         jti = claims.get("jti")
         if not jti:
@@ -396,8 +417,7 @@ class AuthEngine:
         sid = claims.get("sid") or claims.get("session_id")
         if sid and sid != session_id:
             raise AuthenticationError(
-                "Token session binding mismatch (T1-003) — "
-                "token bound to a different session"
+                "Token session binding mismatch (T1-003) — token bound to a different session"
             )
 
     # ------------------------------------------------------------------
@@ -449,9 +469,7 @@ class AuthEngine:
 
         if self._require_dpop:
             if scheme != "dpop":
-                raise AuthenticationError(
-                    "DPoP required but Authorization scheme is not 'DPoP'"
-                )
+                raise AuthenticationError("DPoP required but Authorization scheme is not 'DPoP'")
             if not dpop_proof:
                 raise AuthenticationError("DPoP required but DPoP proof header is absent")
 
@@ -462,10 +480,30 @@ class AuthEngine:
 
         # If access token is sender-constrained (cnf.jkt present), DPoP is mandatory
         cnf = claims.get("cnf")
-        if cnf and isinstance(cnf, dict) and cnf.get("jkt") and not dpop_proof:
+        cnf_jkt = cnf.get("jkt") if isinstance(cnf, dict) else None
+        if cnf_jkt and not dpop_proof:
             raise AuthenticationError(
                 "Access token is sender-constrained (cnf.jkt) — DPoP proof is required "
                 "(RFC 9449 §7.1)"
+            )
+
+        # RFC 9449 §4.3: when DPoP is in force — either required, or a proof was
+        # presented — the access token MUST be sender-constrained (carry cnf.jkt).
+        # Without it the DPoP proof is never bound to the token (_verify_dpop's
+        # cnf.jkt thumbprint check only fires when cnf.jkt is present), so a
+        # stolen non-bound token could be replayed with any attacker-minted valid
+        # proof. Fail closed unless the operator explicitly opts out.
+        if (
+            self._require_cnf_binding
+            and (self._require_dpop or dpop_proof)
+            and not cnf_jkt
+        ):
+            raise AuthenticationError(
+                "DPoP is in force but the access token is not sender-constrained "
+                "(missing cnf.jkt) — the DPoP proof key cannot be bound to the "
+                "token, permitting replay of a stolen token (RFC 9449 §4.3). "
+                "Issue sender-constrained tokens carrying cnf.jkt, or set "
+                "require_cnf_binding=False to accept unbound tokens (not recommended)."
             )
 
         if dpop_proof:

@@ -36,6 +36,7 @@ _KNOWN_T1 = frozenset(
         "endpoint_uri",
         "dpop_max_age_secs",
         "dpop_future_skew_secs",
+        "require_cnf_binding",
     }
 )
 _KNOWN_T2 = frozenset(
@@ -59,8 +60,8 @@ _KNOWN_T6 = frozenset(
         "typosquat_distance",
     }
 )
-_KNOWN_T7 = frozenset({"enabled", "bind_session_to_dpop"})
-_KNOWN_T8 = frozenset({"enabled", "allow_public_bind", "block_rfc1918"})
+_KNOWN_T7 = frozenset({"enabled"})
+_KNOWN_T8 = frozenset({"enabled", "allow_public_bind", "block_rfc1918", "bind_host", "bind_port"})
 _KNOWN_T9 = frozenset({"enabled", "max_output_length", "strip_injection_patterns"})
 _KNOWN_T10 = frozenset(
     {
@@ -80,7 +81,9 @@ _KNOWN_T11 = frozenset(
         "registry_public_key",
     }
 )
-_KNOWN_T12 = frozenset({"enabled", "path", "log_params_as_digest", "chain_verify_on_startup"})
+_KNOWN_T12 = frozenset(
+    {"enabled", "path", "log_params_as_digest", "chain_verify_on_startup", "require_hmac_key"}
+)
 
 _KNOWN_BY_THREAT: dict[str, frozenset[str]] = {
     "T1": _KNOWN_T1,
@@ -161,6 +164,9 @@ class T1Config:
     endpoint_uri: str | None = None
     dpop_max_age_secs: int = 30
     dpop_future_skew_secs: int = 5
+    # RFC 9449 §4.3: require DPoP-bound tokens to carry cnf.jkt when DPoP is in
+    # force. Fail-closed default — see AuthEngine.require_cnf_binding.
+    require_cnf_binding: bool = True
 
 
 @dataclass(frozen=True)
@@ -201,13 +207,21 @@ class T6Config:
 
 @dataclass(frozen=True)
 class T7Config:
-    bind_to_dpop: bool = True
+    # T7 is transport-bound session continuity only — there is no DPoP-binding
+    # knob here. DPoP sender-constraint is enforced by the T1 AuthEngine
+    # (cnf.jkt). Kept as a marker dataclass so `T7: {enabled: true}` toggles the
+    # SessionEngine on/off.
+    pass
 
 
 @dataclass(frozen=True)
 class T8Config:
     allow_public_bind: bool = False
     block_rfc1918_ssrf: bool = True
+    # T8-001: configured server bind address — validated at guard.startup().
+    # bind_host=None means "no startup bind check" (per-request SSRF still runs).
+    bind_host: str | None = None
+    bind_port: int = 0
 
 
 @dataclass(frozen=True)
@@ -236,6 +250,12 @@ class T11Config:
 class T12Config:
     path: str = "/var/log/mcp-armor/audit.jsonl"
     chain_verify_on_startup: bool = True
+    # A6: require ARMOR_AUDIT_HMAC_KEY at startup when T12 is enabled. Without
+    # an HMAC key the chain is tamper-EVIDENT but forgeable by anyone with write
+    # access to the log (truncate-and-recompute). Defaults True so a production
+    # config fails closed; set False (or env ARMOR_AUDIT_ALLOW_UNSIGNED=1) for a
+    # dev profile that accepts an unsigned chain.
+    require_hmac_key: bool = True
 
 
 @dataclass(frozen=True)
@@ -306,6 +326,7 @@ def load_config(path: str | Path) -> ArmorConfig:
             endpoint_uri=t1_raw.get("endpoint_uri"),
             dpop_max_age_secs=int(t1_raw.get("dpop_max_age_secs", 30)),
             dpop_future_skew_secs=int(t1_raw.get("dpop_future_skew_secs", 5)),
+            require_cnf_binding=bool(t1_raw.get("require_cnf_binding", True)),
         )
         if t1_raw is not None
         else None
@@ -372,13 +393,7 @@ def load_config(path: str | Path) -> ArmorConfig:
 
     # T7
     t7_raw = _t("T7")
-    t7 = (
-        T7Config(
-            bind_to_dpop=bool(t7_raw.get("bind_session_to_dpop", True)),
-        )
-        if t7_raw is not None
-        else None
-    )
+    t7 = T7Config() if t7_raw is not None else None
 
     # T8
     t8_raw = _t("T8")
@@ -386,6 +401,8 @@ def load_config(path: str | Path) -> ArmorConfig:
         T8Config(
             allow_public_bind=bool(t8_raw.get("allow_public_bind", False)),
             block_rfc1918_ssrf=bool(t8_raw.get("block_rfc1918", True)),
+            bind_host=(str(t8_raw["bind_host"]) if t8_raw.get("bind_host") is not None else None),
+            bind_port=int(t8_raw.get("bind_port", 0)),
         )
         if t8_raw is not None
         else None
@@ -435,6 +452,7 @@ def load_config(path: str | Path) -> ArmorConfig:
         T12Config(
             path=str(t12_raw.get("path", "/var/log/mcp-armor/audit.jsonl")),
             chain_verify_on_startup=bool(t12_raw.get("chain_verify_on_startup", True)),
+            require_hmac_key=bool(t12_raw.get("require_hmac_key", True)),
         )
         if t12_raw is not None
         else None

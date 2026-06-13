@@ -4,6 +4,25 @@
 
 - Python 3.11+
 - An MCP server built on FastMCP, FastAPI, or a custom JSON-RPC dispatcher
+- **`ARMOR_SESSION_SECRET`** — required for every deployment (dev and prod). The
+  T7 session signer fails closed without it. Generate one:
+  ```bash
+  python -c "import secrets;print(secrets.token_hex(32))"
+  ```
+
+The **production** reference config (`cosai.yaml.example`) is fail-closed by
+design and additionally requires the following before it will start — set them
+all or the engine refuses to boot:
+
+| Env var / config | Why required | How to provide |
+|---|---|---|
+| `ARMOR_SESSION_SECRET` | T7 session signing (any deployment) | `python -c "import secrets;print(secrets.token_hex(32))"` |
+| `ARMOR_AUDIT_HMAC_KEY` | T12 `require_hmac_key` defaults `true` (audit A6); hex 32 bytes | `openssl rand -hex 32` |
+| Real JWKS + `endpoint_uri` (config) | T1 `require_dpop: true` validates DPoP against your IdP | Point at your IdP's JWKS URL and the public endpoint URI |
+| Writable T12 `path` (config) | Audit log file must be writable | Ensure the directory exists and is writable |
+
+These env vars are read from the process environment — never put secrets in
+`cosai.yaml` or source control.
 
 ## Install
 
@@ -17,11 +36,43 @@ pip install mcp-armor[fastapi]
 pip install mcp-armor[dev]
 ```
 
+Dependencies now carry **upper bounds**. For reproducible installs, generate a
+hash-pinned lockfile yourself with `pip-compile --generate-hashes` — a shipped
+lockfile is **not yet** included.
+
 ---
 
-## 1. Zero-Config Start
+## 1. Fastest first run — the runnable quickstart
 
-The fastest path — sensible defaults, no config file:
+A genuinely runnable config boots on localhost with **one** env var:
+
+```bash
+export ARMOR_SESSION_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+```
+
+```python
+from mcp_armor import CoSAIGuard
+from mcp_armor.adapters.fastapi import ArmorMiddleware
+
+guard = CoSAIGuard.from_config("examples/quickstart/cosai.yaml")
+app = ArmorMiddleware(your_asgi_mcp_app, guard)
+```
+
+Drive the full MCP flow — `initialize` → `tools/list` → `tools/call`. T3 learns
+each tool's `inputSchema` automatically from the `tools/list` response
+(`strict_schema` defaults `true` and now works end to end), so **no manual
+schema registration is needed**: a schema-valid `tools/call` passes, and a
+schema violation is rejected with JSON-RPC `-32602`.
+
+See [`examples/quickstart/README.md`](../examples/quickstart/README.md) for the
+full curl flow. The quickstart is **dev only** — T1/T2/T11 are disabled so you
+can drive the flow without an IdP, tool policy, or allowlist.
+
+---
+
+## 2. Zero-Config Start
+
+Sensible defaults, no config file (still requires `ARMOR_SESSION_SECRET`):
 
 ```python
 from mcp_armor import CoSAIGuard
@@ -34,7 +85,7 @@ This enables all 12 engines with conservative defaults. In production, use a `co
 
 ---
 
-## 2. Config File
+## 3. Config File
 
 Copy the example config and edit it for your deployment:
 
@@ -53,7 +104,7 @@ The config is validated at load time. Unknown keys are rejected. The engine fail
 
 ---
 
-## 3. FastAPI Integration
+## 4. FastAPI Integration
 
 ```python
 from fastapi import FastAPI
@@ -86,7 +137,7 @@ async def shutdown():
 
 ---
 
-## 4. Raw JSON-RPC Dispatcher
+## 5. Raw JSON-RPC Dispatcher
 
 For custom transports or stdio servers:
 
@@ -208,7 +259,7 @@ The scanner detects T1/T3/T8/T10 failures from outside. mcp-armor enforces T4/T9
 | Bind address check, SSRF prevention | T8 |
 | LLM output sanitization — 5-step pipeline | T9 |
 | Call budget, wall-clock limit, loop depth, active heartbeat reaper | T10 |
-| Tool allowlist, registry signature check | T11 |
+| Tool allowlist, registry Ed25519 signature check (opt-in) | T11 |
 | HMAC-signed hash-chained JSON Lines audit log, DAG tracing | T12 |
 
 ---
@@ -243,6 +294,10 @@ during the rotation grace period.
 
 `dry_run: true` (in `cosai.yaml` or `CoSAIGuard(dry_run=True)`) disables all enforcement.
 Violations are logged but not blocked. Use it only for local configuration tuning.
+
+As a guardrail, a guard with `dry_run=True` **will not even construct** unless
+`ARMOR_ALLOW_DRY_RUN=1` is set in the environment — so it can never be enabled
+by accident in an environment that does not explicitly opt in.
 
 Check your config before deploying:
 ```bash
@@ -289,6 +344,7 @@ See [cosai.yaml.example](../cosai.yaml.example) for the full annotated configura
 | Key | Default | Description |
 |---|---|---|
 | `T1.require_dpop` | `true` | Require DPoP proof-of-possession on every request |
+| `T1.require_cnf_binding` | `true` | Under DPoP, require sender-constrained access tokens (`cnf.jkt`) — RFC 9449 §4.3. Rejects unbound tokens that a stolen-token replay could ride |
 | `T2.default_policy` | `deny` | Deny tools not listed in `tool_policies` |
 | `T3.max_payload_bytes` | `65536` | Maximum JSON-serialized params size |
 | `T5.profile` | `pci` | PII detection profile |

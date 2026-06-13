@@ -7,6 +7,7 @@ threats:
   T1:
     enabled: true
     require_dpop: true                  # RFC 9449 DPoP sender-binding (recommended)
+    require_cnf_binding: true           # RFC 9449 §4.3: under DPoP, tokens must carry cnf.jkt (fail-closed)
     jti_cache_size: 10000               # JTI replay cache capacity
     token_expiry_max_secs: 3600         # Reject tokens older than 1 hour
     issuer: "https://auth.example.com"  # Expected JWT issuer
@@ -60,16 +61,18 @@ threats:
       - send_notification
       - list_records
 
-  # T7 — Session security
+  # T7 — Session security (transport-bound continuity; DPoP sender-constraint
+  # is enforced by T1 via cnf.jkt — there is no bind_session_to_dpop knob)
   T7:
     enabled: true
-    bind_session_to_dpop: true  # Requires DPoP-bound session tokens
 
   # T8 — Network binding
   T8:
     enabled: true
-    allow_public_bind: false    # Reject 0.0.0.0 binds
+    allow_public_bind: false    # if bind_host set, reject 0.0.0.0 at startup
     block_rfc1918: true         # Block SSRF to internal ranges
+    # bind_host: 127.0.0.1      # set to enable the T8-001 startup bind check
+    # bind_port: 8000
 
   # T9 — Trust boundary violations (LLM output sanitization)
   T9:

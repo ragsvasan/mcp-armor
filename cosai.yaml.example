@@ -1,24 +1,54 @@
+# =============================================================================
+# mcp-armor — PRODUCTION reference config (all 12 CoSAI threat engines on)
+# =============================================================================
+#
+# This is the secure, fail-closed reference. It will NOT start until you provide
+# its prerequisites — that is deliberate (a security middleware must not boot
+# half-configured). For a config that runs out-of-the-box on localhost for a
+# first look, copy examples/quickstart/cosai.yaml instead.
+#
+# -----------------------------------------------------------------------------
+# REQUIRED before this config will start  (B2 — documented prerequisites)
+# -----------------------------------------------------------------------------
+#   1. ARMOR_SESSION_SECRET   — >=32-byte secret for the T7 session signer.
+#                               Generate:  python -c "import secrets;print(secrets.token_hex(32))"
+#   2. ARMOR_AUDIT_HMAC_KEY   — hex 32-byte key for the T12 tamper-evident chain.
+#                               Generate:  openssl rand -hex 32
+#                               (T12.require_hmac_key defaults true; without this
+#                                key startup refuses — set require_hmac_key: false
+#                                or ARMOR_AUDIT_ALLOW_UNSIGNED=1 only for dev.)
+#   3. A real JWKS + endpoint_uri under T1 below — REPLACE the SAMPLE key with
+#                               your IdP's published JWKS (or its keys).
+#   4. A writable T12 `path` — the default /var/log/mcp-armor must exist and be
+#                               writable by the server process, or change it.
+#
+# Store secrets in a secret manager (Vault, AWS/GCP Secrets Manager), never here.
+# =============================================================================
+
 version: 1
 
-# ---------------------------------------------------------------------------
-# dry_run — NOT FOR PRODUCTION
-# ---------------------------------------------------------------------------
-# When true, all CoSAI violations are caught and logged at WARNING level but
-# the request is allowed to proceed unchanged.  The audit log still records
-# the event, tagged with "dry_run": true.
-#
-# Use this ONLY during initial config tuning to see what would be blocked
-# without actually blocking traffic.  NEVER enable in production: it disables
-# all enforcement while keeping the appearance of protection.
-#
+# dry_run — NOT FOR PRODUCTION. Even with dry_run: true in this file the guard
+# now REFUSES to construct unless ARMOR_ALLOW_DRY_RUN=1 is also set in the env
+# (B6). dry_run disables all non-auth enforcement; use only on a tuning host.
 # dry_run: false   # default — enforcement is active
 
 threats:
   T1:
     enabled: true
-    require_dpop: true
+    require_dpop: true                # require RFC 9449 DPoP proof-of-possession
+    require_cnf_binding: true         # under DPoP, require sender-constrained tokens (cnf.jkt) — RFC 9449 §4.3
     jti_cache_size: 10000
     token_expiry_max_secs: 3600
+    endpoint_uri: https://mcp.example.com/rpc   # REPLACE — your canonical endpoint (DPoP htu)
+    # REPLACE this SAMPLE key with your IdP's JWKS. Construction requires `jwks`;
+    # this placeholder lets the config build so you can see the shape. An `oct`
+    # (HS*) key here only verifies symmetric access tokens — production should
+    # publish asymmetric (RSA/EC/EdDSA) keys from your IdP.
+    jwks:
+      keys:
+        - kty: oct
+          k: REPLACE_WITH_BASE64URL_KEY_FROM_YOUR_IDP
+          kid: sample
 
   T2:
     enabled: true
@@ -30,29 +60,23 @@ threats:
     # ---------------------------------------------------------------------------
     # echo_confirm_token — SECURITY PARADOX: read before enabling
     # ---------------------------------------------------------------------------
-    # This setting has an irresolvable tradeoff for the destructive-tool gate:
-    #
     #   false (default): the confirmation token is server-log-only. Human
-    #   operators can retrieve it out-of-band and re-submit. Clients that
-    #   cannot read server logs (most agents) cannot complete the flow.
-    #
-    #   true: the token IS returned in the JSON-RPC error body. This lets the
-    #   flow complete for all clients, BUT autonomous LLM agents that can read
-    #   their own error messages will parse the token and auto-resubmit on the
-    #   very next call — fully defeating the human-in-the-loop gate.
-    #
-    # The gate is only meaningful for deployments where the client routes the
-    # error through a human approval step BEFORE the token reaches the agent
-    # (e.g. a UI "Are you sure?" dialog). For fully autonomous agent clients,
-    # pair with RFC 9470 step-up authentication or an out-of-band workflow.
-    # See: docs/SECURITY.md § "Destructive Tool Gate — Known Limitations"
-    #
+    #   operators can retrieve it out-of-band and re-submit. Autonomous clients
+    #   that cannot read server logs cannot complete the flow.
+    #   true: the token IS returned in the JSON-RPC error body — which lets a
+    #   fully autonomous LLM agent parse and auto-resubmit it on the next call,
+    #   defeating the human-in-the-loop gate (see docs/SECURITY.md
+    #   § "Destructive Tool Gate — Known Limitations"). The gate is only
+    #   meaningful when the client routes the error through a HUMAN approval step
+    #   before the token reaches the agent. For autonomous agents this control is
+    #   not yet delivered — pair with RFC 9470 step-up auth (roadmap).
     # echo_confirm_token: false   # default
 
   T3:
     enabled: true
     max_payload_bytes: 65536
-    strict_schema: true
+    strict_schema: true               # tool input schemas are auto-registered from
+                                      # the observed tools/list response and enforced
 
   T4:
     enabled: true
@@ -62,25 +86,41 @@ threats:
   T5:
     enabled: true
     profile: pci                      # minimal | pci | hipaa | gdpr | strict
+                                      # BLOCK semantics: a response containing PII
+                                      # is refused (opaque error), not redacted.
 
   T6:
     enabled: true
     baseline_on_initialize: true
     fail_on_drift: true
+    # NOTE: the manifest/drift baseline is in-process. With workers > 1 an
+    # attacker can route the second tools/list to a different worker to escape
+    # drift detection (documented limitation — see docs/ARCHITECTURE.md). Run a
+    # single worker, or back the session store with a shared store, for T6 across
+    # horizontally-scaled deployments.
 
   T7:
     enabled: true
-    bind_session_to_dpop: true
+    # T7 is transport-bound session CONTINUITY only. DPoP sender-constraint
+    # (proof-of-possession) is enforced by T1 via the access token's cnf.jkt
+    # claim — there is no DPoP-binding knob here (the old bind_session_to_dpop
+    # flag was a no-op label and has been removed).
 
   T8:
     enabled: true
-    allow_public_bind: false          # 0.0.0.0 → error at startup
+    allow_public_bind: false          # if bind_host is set, 0.0.0.0/:: → error at startup
     block_rfc1918: true
+    # bind_host / bind_port — set these to your server's configured bind address
+    # to enable the T8-001 startup check (rejects 0.0.0.0 unless allow_public_bind).
+    # bind_host: 127.0.0.1
+    # bind_port: 8000
 
   T9:
     enabled: true
     max_output_length: 32768
-    strip_injection_patterns: true
+    strip_injection_patterns: true    # BLOCK semantics: on_response refuses a
+                                      # response containing injection patterns
+                                      # (it does not strip them on this path)
 
   T10:
     enabled: true
@@ -92,28 +132,21 @@ threats:
   T11:
     enabled: true
     tool_allowlist: []                # empty list = deny all unlisted tools
-    require_registry_signature: false
+    require_registry_signature: false # OPT-IN. Set true AND registry_public_key
+                                      # to enforce Ed25519-signed tool definitions
+                                      # (T11-003). OFF by default.
+    # registry_public_key: |
+    #   -----BEGIN PUBLIC KEY-----
+    #   ...your Ed25519 registry key...
+    #   -----END PUBLIC KEY-----
 
   T12:
     enabled: true
-    path: /var/log/mcp-armor/audit.jsonl
+    path: /var/log/mcp-armor/audit.jsonl   # must be writable; change for non-root
     log_params_as_digest: true
     chain_verify_on_startup: true
-    # ---------------------------------------------------------------------------
-    # ARMOR_AUDIT_HMAC_KEY (environment variable — not stored in this file)
-    # ---------------------------------------------------------------------------
-    # Set this environment variable to a hex-encoded 32+ byte secret to enable
-    # HMAC signing of each audit chain link.  When set, every record gains a
-    # "chain_hmac" field that is unforgeable without the key.
-    #
-    # Without this key, the hash chain can be truncated and recalculated by
-    # anyone with write access to the log file — erasing evidence without
-    # detection.  With the key, recalculating is computationally infeasible
-    # without possessing the secret.
-    #
-    # Generate a key:
-    #   python -c "import secrets; print(secrets.token_hex(32))"
-    #
-    # Production deployments MUST set ARMOR_AUDIT_HMAC_KEY.
-    # Store it in your secret manager (Vault, AWS Secrets Manager, etc.),
-    # NOT in this config file or in source control.
+    require_hmac_key: true            # require ARMOR_AUDIT_HMAC_KEY (see header).
+                                      # Set false (or ARMOR_AUDIT_ALLOW_UNSIGNED=1)
+                                      # ONLY for a dev profile — an unsigned chain
+                                      # is tamper-EVIDENT but forgeable by anyone
+                                      # with write access to the log file.

@@ -60,8 +60,22 @@ class CoSAIGuard:
     def __init__(self, engines: list[ProtectionEngine], dry_run: bool = False) -> None:
         self._engines = engines
         if dry_run:
-            log.warning(
-                "CoSAIGuard: dry_run=True — ALL enforcement is DISABLED. "
+            # B6: hard prod guard. dry_run disables all non-auth enforcement, so
+            # shipping it to production silently neuters the middleware. Refuse to
+            # construct unless the operator has explicitly acknowledged it via
+            # ARMOR_ALLOW_DRY_RUN=1 — a config-file flag alone is too easy to
+            # leave on by accident.
+            import os
+
+            if os.environ.get("ARMOR_ALLOW_DRY_RUN") != "1":
+                raise RuntimeError(
+                    "CoSAIGuard: dry_run=True is refused unless ARMOR_ALLOW_DRY_RUN=1 "
+                    "is set in the environment. dry_run DISABLES all non-auth "
+                    "enforcement and must never reach production. Set the env var "
+                    "only on a tuning host to acknowledge this."
+                )
+            log.error(
+                "CoSAIGuard: dry_run=True — ALL non-auth enforcement is DISABLED. "
                 "Violations are logged but NOT blocked. NOT FOR PRODUCTION."
             )
         self._dry_run = dry_run
@@ -101,6 +115,7 @@ class CoSAIGuard:
                 AuditEngine(
                     path=cfg.t12.path,
                     verify_on_startup=cfg.t12.chain_verify_on_startup,
+                    require_hmac=cfg.t12.require_hmac_key,
                 )
             )
 
@@ -117,17 +132,20 @@ class CoSAIGuard:
                     endpoint_uri=cfg.t1.endpoint_uri,
                     dpop_max_age_secs=cfg.t1.dpop_max_age_secs,
                     dpop_future_skew_secs=cfg.t1.dpop_future_skew_secs,
+                    require_cnf_binding=cfg.t1.require_cnf_binding,
                 )
             )
 
         if cfg.t7 is not None:
-            engines.append(SessionEngine(bind_to_dpop=cfg.t7.bind_to_dpop))
+            engines.append(SessionEngine())
 
         if cfg.t8 is not None:
             engines.append(
                 NetworkEngine(
                     allow_public_bind=cfg.t8.allow_public_bind,
                     block_rfc1918_ssrf=cfg.t8.block_rfc1918_ssrf,
+                    bind_host=cfg.t8.bind_host,
+                    bind_port=cfg.t8.bind_port,
                 )
             )
 
