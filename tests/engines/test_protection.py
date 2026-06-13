@@ -17,6 +17,7 @@ def _eng(profile: str = "strict") -> ProtectionEngine:
 # PCI profile — SSN, credit card, JWT, API key
 # ---------------------------------------------------------------------------
 
+
 async def test_ssn_in_response_blocked_pci() -> None:
     eng = _eng(profile="pci")
     resp = make_response("Your SSN is 123-45-6789")
@@ -51,6 +52,7 @@ async def test_api_key_in_response_blocked_pci() -> None:
 # HIPAA/GDPR/strict profiles — email, phone also blocked
 # ---------------------------------------------------------------------------
 
+
 async def test_email_in_response_blocked_strict() -> None:
     eng = _eng(profile="strict")
     resp = make_response("Contact: alice@example.com")
@@ -68,6 +70,7 @@ async def test_phone_in_response_blocked_strict() -> None:
 # ---------------------------------------------------------------------------
 # Minimal profile — only JWT and API key
 # ---------------------------------------------------------------------------
+
 
 async def test_email_passes_minimal_profile() -> None:
     eng = _eng(profile="minimal")
@@ -95,6 +98,7 @@ async def test_jwt_blocked_minimal_profile() -> None:
 # Empty / unknown profile
 # ---------------------------------------------------------------------------
 
+
 async def test_empty_response_passes() -> None:
     eng = _eng()
     resp = make_response("")
@@ -114,8 +118,10 @@ async def test_unknown_profile_defaults_to_pci() -> None:
 # Request passthrough
 # ---------------------------------------------------------------------------
 
+
 async def test_on_request_passthrough() -> None:
     from tests.conftest import make_request
+
     eng = _eng()
     ctx = make_ctx()
     req = make_request()

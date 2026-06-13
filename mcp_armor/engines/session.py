@@ -24,6 +24,15 @@ class SessionEngine:
     Binds sessions to their originating transport and prevents fixation / replay
     — statelessly, via a signed token. No server-side session state exists.
 
+    Scope — transport-bound session CONTINUITY, not a sender-constrained
+    credential. The token binds `transport` into its MAC; it intentionally does
+    NOT bind a DPoP key thumbprint. DPoP sender-constraint (proof-of-possession,
+    rejecting a token presented with the wrong key) is enforced by the T1
+    AuthEngine on every request via the access token's `cnf.jkt` claim against
+    the presented DPoP proof. A prior `bind_to_dpop` / `bind_session_to_dpop`
+    flag here was a no-op label (stored, never read) and has been removed so the
+    configuration surface only advertises behaviour the code actually enforces.
+
     Covers:
     - T7-001: Session fixation (forged / foreign session IDs fail signature check)
     - T7-002: Token in URL (session ID leaks via Referer / logs)
@@ -38,10 +47,8 @@ class SessionEngine:
 
     def __init__(
         self,
-        bind_to_dpop: bool = True,
         signer: SessionSigner | None = None,
     ) -> None:
-        self._bind_to_dpop = bind_to_dpop
         # Fail-closed: SessionSigner.from_env() raises if ARMOR_SESSION_SECRET
         # is absent — the guard build aborts rather than minting unverifiable
         # tokens. Tests inject an explicit signer.

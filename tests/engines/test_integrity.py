@@ -25,6 +25,7 @@ TOOLS_B = [{"name": "tool_a", "description": "A"}, {"name": "tool_c", "descripti
 # Drift detection (T6-001)
 # ---------------------------------------------------------------------------
 
+
 def test_no_drift_when_hash_matches() -> None:
     eng = _engine()
     ctx = make_ctx().with_manifest_hash(IntegrityEngine._manifest_hash(TOOLS_A))
@@ -54,6 +55,7 @@ def test_drift_allowed_when_fail_on_drift_false() -> None:
 # Typosquatting (T6-002)
 # ---------------------------------------------------------------------------
 
+
 def test_exact_allowlist_match_passes() -> None:
     eng = _engine(allowlist=["tool_a", "tool_b"])
     eng.scan_tool_manifest([{"name": "tool_a"}, {"name": "tool_b"}])
@@ -66,6 +68,7 @@ def test_typosquat_distance_1_raises_high() -> None:
         eng.scan_tool_manifest([{"name": "toolslist"}])  # delete underscore → distance 1
     assert exc_info.value.finding is not None
     from mcp_armor.types import Severity
+
     assert exc_info.value.finding.severity == Severity.HIGH
 
 
@@ -76,6 +79,7 @@ def test_typosquat_distance_2_raises_medium() -> None:
         eng.scan_tool_manifest([{"name": "tXol_a"}])  # 2 substitutions
     assert exc_info.value.finding is not None
     from mcp_armor.types import Severity
+
     assert exc_info.value.finding.severity in (Severity.MEDIUM, Severity.HIGH)
 
 
@@ -93,16 +97,19 @@ def test_no_allowlist_skips_typosquat_check() -> None:
 # NFKC homoglyph detection (T6-003 shadowing + T6-002 typosquatting)
 # ---------------------------------------------------------------------------
 
+
 def test_nfkc_homoglyph_shadowing_detected() -> None:
     """Two tools that look different but NFKC-normalize to same string."""
     # U+FF54 (ｔ FULLWIDTH LATIN SMALL LETTER T) normalizes to 't'
     eng = _engine()
     fake_name = "ｔool_a"  # fullwidth 't' + "ool_a"
     with pytest.raises(IntegrityError, match="homoglyph"):
-        eng.scan_tool_manifest([
-            {"name": "tool_a"},
-            {"name": fake_name},
-        ])
+        eng.scan_tool_manifest(
+            [
+                {"name": "tool_a"},
+                {"name": fake_name},
+            ]
+        )
 
 
 def test_nfkc_allowlist_lookup_catches_lookalike() -> None:
@@ -126,6 +133,7 @@ def test_distinct_tools_no_false_shadowing() -> None:
 # scan_tool_manifest smoke tests
 # ---------------------------------------------------------------------------
 
+
 def test_scan_empty_manifest_passes() -> None:
     eng = _engine()
     findings = eng.scan_tool_manifest([])
@@ -141,6 +149,7 @@ def test_scan_returns_empty_list_on_clean() -> None:
 # ---------------------------------------------------------------------------
 # Panel regression tests
 # ---------------------------------------------------------------------------
+
 
 def test_regression_duplicate_ascii_name_raises_shadowing() -> None:
     """FIX-1: exact duplicate tool names must be caught — same normalized form collides."""
@@ -163,16 +172,18 @@ def test_regression_non_string_name_raises() -> None:
         eng.scan_tool_manifest([{"name": 123}])
 
 
-
 # ---------------------------------------------------------------------------
 # Codex P1: on_response intercepts tools/list for manifest scan + drift detection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_on_response_first_toolslist_stores_hash() -> None:
     """P1: first tools/list response must snapshot manifest hash into context."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine()
     ctx = make_ctx()
     assert ctx.tool_manifest_hash == ""
@@ -188,8 +199,10 @@ async def test_regression_on_response_first_toolslist_stores_hash() -> None:
 @pytest.mark.asyncio
 async def test_regression_on_response_same_manifest_no_drift() -> None:
     """P1: identical tools/list in same session must not raise (no drift)."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine()
     ctx = make_ctx()
     tools = [{"name": "tool_a"}]
@@ -203,8 +216,10 @@ async def test_regression_on_response_same_manifest_no_drift() -> None:
 @pytest.mark.asyncio
 async def test_regression_on_response_changed_manifest_raises_drift() -> None:
     """P1: changed tools/list mid-session must raise IntegrityError (T6-001 rug pull)."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine(fail_on_drift=True)
     ctx = make_ctx()
     resp_v1 = MCPResponse(
@@ -226,8 +241,10 @@ async def test_regression_on_response_changed_manifest_raises_drift() -> None:
 @pytest.mark.asyncio
 async def test_regression_on_response_non_tools_list_not_checked() -> None:
     """P1: on_response must not process responses without 'tools' key."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine()
     ctx = make_ctx()
     resp = MCPResponse(

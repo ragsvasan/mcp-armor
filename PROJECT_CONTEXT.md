@@ -43,9 +43,13 @@ sidecar proxy pattern. See [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md).
 
 ---
 
-## Current State (v0.1.0 — 2026-04-28)
+## Current State (v1.1.0 — 2026-06-12)
 
 **All 12 engines are fully implemented and tested. No stubs remain.**
+
+Version is reconciled to **1.1.0** after the external security audit remediation (previously
+inconsistent: pyproject 0.1.0, PyPI 1.0.2, no git tags). Operator must `git tag v1.1.0` to
+match the source of truth.
 
 | Component | Status |
 |-----------|--------|
@@ -57,12 +61,29 @@ sidecar proxy pattern. See [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md).
 | Typed `ArmorConfig` / `cosai.yaml` loader | ✅ Implemented |
 | CI — GitHub Actions matrix (3.11/3.12) | ✅ Live |
 | PyPI trusted publisher workflow | ✅ Ready |
-| Test suite | ✅ 336 tests, 90%+ coverage |
-| Examples | ✅ fastmcp_basic, fastapi_basic, custom_engine, cosai_yaml_full |
+| Test suite | ✅ 577 tests, 90%+ coverage |
+| Examples | ✅ quickstart (boots with `ARMOR_SESSION_SECRET` only), fastmcp_basic, fastapi_basic, custom_engine, cosai_yaml_full |
 | Docs | ✅ All current |
 
+**Enforced behavior (v1.1.0 — locked):**
+- Response engines (T4/T5/T9) **block** — a violation raises and an opaque error replaces the
+  whole response; they do not scrub/strip/redact in place. Only `TrustEngine.sanitize()`
+  (an explicit call) redacts.
+- T3 JSON-schema validation is **live**: a tool's `inputSchema` auto-registers from the
+  observed `tools/list` response; a schema-valid `tools/call` passes, a violation → `-32602`.
+- T7 is transport-bound session **continuity** only. The `bind_session_to_dpop` flag was
+  removed; DPoP sender-constraint is enforced by T1 via the access-token `cnf.jkt` claim.
+- T11 blocks typosquats / non-allowlisted tools by default; Ed25519 registry signature
+  verification is opt-in (`require_registry_signature`, default false).
+- T12 HMAC signing is required by default (`T12.require_hmac_key` true; `ARMOR_AUDIT_HMAC_KEY`
+  must be set at startup). Dev opt-out: `require_hmac_key: false` or `ARMOR_AUDIT_ALLOW_UNSIGNED=1`.
+- `dry_run` refuses to construct unless `ARMOR_ALLOW_DRY_RUN=1` is set.
+- SIEM/SOAR export is file-tail-only today — T12 writes portable JSONL a SIEM can tail;
+  no emitter ships yet.
+- Benchmarks: `benchmarks/chain_overhead.py` (Apple M5, 20k iters) — CPU scan chain
+  p50 ≈ 115 µs / p99 ≈ 158 µs; full chain incl T12 audit disk I/O p50 ≈ 608 µs / p99 ≈ 810 µs.
+
 **Known limitations (not bugs):**
-- T5 blocks PII responses — does not redact and forward
 - T10 heartbeat config accepted but background monitor not implemented
 - TypeScript servers require the sidecar proxy pattern (see [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md))
 
@@ -110,6 +131,7 @@ docs/
   CONTRIBUTING.md      Standards, panel gates, PR checklist
 
 examples/
+  quickstart/          Runnable cosai.yaml — boots with just ARMOR_SESSION_SECRET
   fastmcp_basic/       FastMCP server wrapped with mcp-armor
   fastapi_basic/       FastAPI + ArmorMiddleware
   custom_engine/       How to write a ProtectionEngine subclass

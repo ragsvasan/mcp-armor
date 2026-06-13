@@ -51,10 +51,3 @@ jobs:
         with:
           fail_ci_if_error: false
 
-      - name: Notify acme-proveout
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && matrix.python-version == '3.11'
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.ACME_DISPATCH_TOKEN }}
-          repository: ragsvasan/acme-proveout
-          event-type: mcp-armor-updated

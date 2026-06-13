@@ -28,14 +28,16 @@ def _engine(policies=None, default_deny=True, ttl=60, echo_confirm_token=False) 
     )
 
 
-def _ctx_with_user(user_id: str = "u1", tenant_id: str | None = "t1",
-                   scopes: tuple[str, ...] = ()) -> CoSAIContext:
+def _ctx_with_user(
+    user_id: str = "u1", tenant_id: str | None = "t1", scopes: tuple[str, ...] = ()
+) -> CoSAIContext:
     return make_ctx().with_user(user_id, tenant_id).with_scopes(scopes)
 
 
 # ---------------------------------------------------------------------------
 # Default-deny gate (T2-001 baseline)
 # ---------------------------------------------------------------------------
+
 
 async def test_default_deny_unlisted_tool() -> None:
     eng = _engine(default_deny=True)
@@ -61,6 +63,7 @@ async def test_non_tools_call_method_skipped() -> None:
 # ---------------------------------------------------------------------------
 # T2-001: required_scopes subset check
 # ---------------------------------------------------------------------------
+
 
 async def test_required_scope_present_passes() -> None:
     eng = _engine(policies={"q": _policy(required_scopes=("read:public",))})
@@ -99,6 +102,7 @@ async def test_empty_required_scopes_always_passes() -> None:
 # T2-002: confused deputy
 # ---------------------------------------------------------------------------
 
+
 async def test_user_only_tool_with_user_passes() -> None:
     eng = _engine(policies={"priv": _policy(user_only=True)})
     ctx = _ctx_with_user(user_id="alice")
@@ -126,6 +130,7 @@ async def test_user_only_tool_empty_user_id_denied() -> None:
 # ---------------------------------------------------------------------------
 # T2-003: tenant isolation
 # ---------------------------------------------------------------------------
+
 
 async def test_tenant_isolated_matching_tenant_passes() -> None:
     eng = _engine(policies={"t_op": _policy(tenant_isolated=True)})
@@ -155,6 +160,7 @@ async def test_regression_tenant_isolated_no_arg_tenant_denied() -> None:
 # ---------------------------------------------------------------------------
 # T2-004: destructive two-stage commit gate
 # ---------------------------------------------------------------------------
+
 
 async def test_destructive_tool_no_token_denied() -> None:
     eng = _engine(policies={"nuke": _policy(destructive=True)})
@@ -188,6 +194,7 @@ async def test_destructive_tool_valid_token_passes() -> None:
     msg = str(exc_info.value)
     # Token is between single quotes after '_confirm_token':
     import re
+
     match = re.search(r"'_confirm_token': '([^']+)'", msg)
     assert match, f"Could not extract token from: {msg}"
     token = match.group(1)
@@ -222,6 +229,7 @@ async def test_destructive_token_single_use() -> None:
         await eng.on_request(ctx, req1)
 
     import re
+
     token = re.search(r"'_confirm_token': '([^']+)'", str(exc_info.value)).group(1)  # type: ignore
 
     # Use token once — should succeed
@@ -236,6 +244,7 @@ async def test_destructive_token_single_use() -> None:
 # ---------------------------------------------------------------------------
 # _TokenStore unit tests
 # ---------------------------------------------------------------------------
+
 
 def test_token_store_issue_and_consume() -> None:
     store = _TokenStore(ttl_seconds=60)
@@ -258,6 +267,7 @@ def test_token_store_missing_session_fails() -> None:
 
 def test_token_store_expired_fails() -> None:
     import time
+
     store = _TokenStore(ttl_seconds=0)  # immediate expiry
     sid = str(uuid.uuid4())
     token = store.issue(sid, "my_tool")
@@ -277,6 +287,7 @@ def test_token_store_reissue_replaces_old_token() -> None:
 # ---------------------------------------------------------------------------
 # Panel regression tests — P0 and P1 findings
 # ---------------------------------------------------------------------------
+
 
 def test_regression_dummy_compare_uses_fixed_length_secret() -> None:
     """FIX-2: consume() must compare against a fixed-length dummy, not self-referential."""
@@ -302,10 +313,13 @@ def test_regression_token_bound_to_tool_name() -> None:
 
 async def test_regression_confirm_token_not_transferable_across_tools() -> None:
     """FIX-4 (Opus): token obtained for nuke_a cannot execute nuke_b in the same session."""
-    eng = _engine(policies={
-        "nuke_a": _policy(destructive=True),
-        "nuke_b": _policy(destructive=True),
-    }, echo_confirm_token=True)
+    eng = _engine(
+        policies={
+            "nuke_a": _policy(destructive=True),
+            "nuke_b": _policy(destructive=True),
+        },
+        echo_confirm_token=True,
+    )
     ctx = _ctx_with_user()
     import re
 
@@ -324,6 +338,7 @@ async def test_regression_confirm_token_not_transferable_across_tools() -> None:
 def test_regression_token_store_evicts_expired_entries() -> None:
     """FIX-7 (Sonnet): issue() lazily evicts expired entries."""
     import time
+
     store = _TokenStore(ttl_seconds=0)  # immediate expiry
     sid = str(uuid.uuid4())
     for i in range(5):
@@ -350,6 +365,7 @@ def test_regression_confirm_token_non_string_types_denied() -> None:
 # ---------------------------------------------------------------------------
 # T2-004b: filter_tools_list — scope-filtered manifest (cosai-mcp T02-004)
 # ---------------------------------------------------------------------------
+
 
 def test_filter_tools_list_hides_tool_requiring_missing_scope() -> None:
     """Caller without write scope must not see tools that require it."""
@@ -423,9 +439,10 @@ def test_filter_tools_list_hides_admin_tools_from_read_only_caller() -> None:
 
 def test_regression_filter_tools_list_no_authz_engine_passthrough() -> None:
     """CoSAIGuard.filter_tools_list returns all names when no AuthzEngine is configured."""
-    from mcp_armor.guard import CoSAIGuard
     from mcp_armor.engines.session import SessionEngine
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    from mcp_armor.guard import CoSAIGuard
+
+    guard = CoSAIGuard([SessionEngine()])
     ctx = make_ctx()
     names = ["tool_a", "tool_b"]
     assert guard.filter_tools_list(names, ctx) == names

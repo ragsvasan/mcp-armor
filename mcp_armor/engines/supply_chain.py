@@ -34,9 +34,10 @@ def _levenshtein(a: str, b: str) -> int:
 
 def _load_ed25519_public_key(pem_or_b64: str):  # type: ignore[return]
     """Load an Ed25519 public key from PEM or raw base64-encoded bytes."""
-    from cryptography.hazmat.primitives.serialization import load_pem_public_key
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     import base64
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
     pem_or_b64 = pem_or_b64.strip()
     if pem_or_b64.startswith("-----"):
@@ -48,14 +49,12 @@ def _load_ed25519_public_key(pem_or_b64: str):  # type: ignore[return]
     # Try raw base64 (32-byte Ed25519 public key)
     try:
         raw = base64.b64decode(pem_or_b64)
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-        from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
         from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
         return ed25519.Ed25519PublicKey.from_public_bytes(raw)
     except Exception as exc:
-        raise SupplyChainError(
-            f"Cannot load registry public key: {exc}"
-        ) from exc
+        raise SupplyChainError(f"Cannot load registry public key: {exc}") from exc
 
 
 class SupplyChainEngine:
@@ -141,15 +140,18 @@ class SupplyChainEngine:
         Signature is stored in the `_sig` field or provided as a sidecar.
         """
         import binascii
+
         if self._pub_key is None:
             raise SupplyChainError(
                 "Registry signature verification requested but no public key configured"
             )
         from cryptography.exceptions import InvalidSignature
+
         try:
             canonical = json.dumps(
                 {k: v for k, v in tool.items() if not k.startswith("_")},
-                sort_keys=True, separators=(",", ":"),
+                sort_keys=True,
+                separators=(",", ":"),
             ).encode()
             sig_bytes = binascii.unhexlify(signature_hex)
             self._pub_key.verify(sig_bytes, canonical)

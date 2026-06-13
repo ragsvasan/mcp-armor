@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import time
 import uuid
 from types import MappingProxyType
 
@@ -12,10 +11,9 @@ from types import MappingProxyType
 # fail-closed path use monkeypatch.delenv to remove it for that test only.
 os.environ.setdefault("ARMOR_SESSION_SECRET", "test-" + "s" * 40)
 
-import pytest
 
 from mcp_armor.context import CoSAIContext
-from mcp_armor.types import BudgetState, MCPRequest, MCPResponse
+from mcp_armor.types import MCPRequest, MCPResponse
 
 
 def make_ctx(session_id: str | None = None, transport: str = "http") -> CoSAIContext:

@@ -479,9 +479,7 @@ async def test_regression_dpop_stale_iat_raises():
 @pytest.mark.asyncio
 async def test_regression_dpop_iat_future_window_capped_at_skew():
     """Proof with iat > now + dpop_future_skew_secs must be rejected."""
-    engine, key = _engine(
-        dpop_max_age_secs=30, dpop_future_skew_secs=5, require_cnf_binding=False
-    )
+    engine, key = _engine(dpop_max_age_secs=30, dpop_future_skew_secs=5, require_cnf_binding=False)
     ec_key = _ec_keypair()
     token = _signed_jwt(_now_claims(), key)
     proof = _dpop_proof(token, ec_key, iat=int(time.time()) + 25)

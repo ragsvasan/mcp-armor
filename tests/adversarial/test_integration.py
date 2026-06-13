@@ -190,7 +190,7 @@ class TestResponseBlockingBeforeSend:
                 )
             return JSONResponse({"jsonrpc": "2.0", "id": payload.get("id"), "result": {}})
 
-        guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), ProtectionEngine(profile="pci")])
+        guard = CoSAIGuard([SessionEngine(), ProtectionEngine(profile="pci")])
         app = _make_mw_app(leaking_upstream, guard)
 
         async with _mw_client(app) as client:
@@ -224,7 +224,7 @@ class TestResponseBlockingBeforeSend:
                 )
             return JSONResponse({"jsonrpc": "2.0", "id": payload.get("id"), "result": {}})
 
-        guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), BoundaryEngine(scan_responses=True)])
+        guard = CoSAIGuard([SessionEngine(), BoundaryEngine(scan_responses=True)])
         app = _make_mw_app(injecting_upstream, guard)
 
         async with _mw_client(app) as client:
@@ -627,7 +627,7 @@ class TestMalformedJsonRpcFuzz:
     def _guard(self) -> CoSAIGuard:
         from mcp_armor.engines.session import SessionEngine
 
-        return CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+        return CoSAIGuard([SessionEngine()])
 
     async def _post_raw(self, body: bytes, content_type: str = "application/json") -> dict:
         from starlette.applications import Starlette
@@ -1112,8 +1112,12 @@ class TestRemediationF2NonToolsCallMethods:
         from mcp_armor.engines.validation import ValidationEngine
 
         # (a) strict_schema=True + empty params → unknown-tool schema gate must
-        # still fire (tool '' has no registered schema).
-        guard_schema = CoSAIGuard([ValidationEngine(strict_schema=True)])
+        # still fire (tool '' is not in the observed manifest). A manifest is
+        # registered first: pre-manifest the schema gate is skipped (A1 self-DoS
+        # fix), so the unknown-tool guarantee holds once a manifest is known.
+        val = ValidationEngine(strict_schema=True)
+        val.register_tools([{"name": "known_tool", "inputSchema": {}}])
+        guard_schema = CoSAIGuard([val])
         schema_result = await _call(
             guard_schema,
             method="tools/call",
@@ -1288,7 +1292,7 @@ class TestRemediationF4F7SessionContextPersistence:
 
         guard = CoSAIGuard(
             [
-                SessionEngine(bind_to_dpop=False),
+                SessionEngine(),
                 IntegrityEngine(fail_on_drift=True),
             ]
         )
@@ -1316,7 +1320,7 @@ class TestRemediationF4F7SessionContextPersistence:
 
         guard = CoSAIGuard(
             [
-                SessionEngine(bind_to_dpop=False),
+                SessionEngine(),
                 ResourceEngine(max_calls_per_session=2),
             ]
         )

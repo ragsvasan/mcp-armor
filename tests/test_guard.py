@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ from mcp_armor.guard import CoSAIGuard
 
 
 def _minimal_guard() -> CoSAIGuard:
-    return CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    return CoSAIGuard([SessionEngine()])
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +28,7 @@ def test_from_config_loads_yaml(tmp_path: Path) -> None:
 version: 1
 threats:
   T7:
-    bind_session_to_dpop: false
+    enabled: true
 """
     cfg_path = tmp_path / "cosai.yaml"
     cfg_path.write_text(yaml_content)
@@ -70,7 +71,7 @@ def test_from_armor_config_builds_session_engine() -> None:
         t4=None,
         t5=None,
         t6=None,
-        t7=T7Config(bind_to_dpop=False),
+        t7=T7Config(),
         t8=None,
         t9=None,
         t10=None,
@@ -100,7 +101,7 @@ async def test_startup_calls_all_engines() -> None:
         async def on_startup(self) -> None:
             started.append("started")
 
-    guard = CoSAIGuard([TrackEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([TrackEngine()])
     await guard.startup()
     assert started == ["started"]
 
@@ -112,7 +113,7 @@ async def test_shutdown_calls_all_engines() -> None:
         async def on_shutdown(self) -> None:
             stopped.append("stopped")
 
-    guard = CoSAIGuard([TrackEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([TrackEngine()])
     await guard.shutdown()
     assert stopped == ["stopped"]
 
@@ -130,7 +131,7 @@ async def test_open_session_calls_on_session_start() -> None:
             opened.append(ctx.session_id)
             return ctx
 
-    guard = CoSAIGuard([TrackEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([TrackEngine()])
     from tests.conftest import make_ctx
 
     ctx = make_ctx()
@@ -145,7 +146,7 @@ async def test_close_session_calls_on_session_end() -> None:
         async def on_session_end(self, ctx) -> None:
             closed.append(ctx.session_id)
 
-    guard = CoSAIGuard([TrackEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([TrackEngine()])
     from tests.conftest import make_ctx
 
     ctx = make_ctx()
@@ -509,7 +510,12 @@ async def test_dry_run_allows_blocked_request(tmp_path) -> None:
 
     # BoundaryEngine will detect the injection attempt and raise
     boundary = BoundaryEngine(scan_call_args=True)
-    guard = CoSAIGuard([audit_engine, boundary], dry_run=True)
+    # B6: dry_run construction is refused unless explicitly acknowledged.
+    os.environ["ARMOR_ALLOW_DRY_RUN"] = "1"
+    try:
+        guard = CoSAIGuard([audit_engine, boundary], dry_run=True)
+    finally:
+        os.environ.pop("ARMOR_ALLOW_DRY_RUN", None)
 
     from types import MappingProxyType
 
@@ -611,7 +617,11 @@ async def test_exploit_dry_run_does_not_bypass_destructive_gate() -> None:
         destructive_token_ttl_seconds=t2.destructive_token_ttl_seconds,
         echo_confirm_token=t2.echo_confirm_token,
     )
-    guard = CoSAIGuard([authz], dry_run=True)
+    os.environ["ARMOR_ALLOW_DRY_RUN"] = "1"
+    try:
+        guard = CoSAIGuard([authz], dry_run=True)
+    finally:
+        os.environ.pop("ARMOR_ALLOW_DRY_RUN", None)
 
     ctx = CoSAIContext.new("test-session", transport="http")
     req = MCPRequest(

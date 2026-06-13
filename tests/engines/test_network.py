@@ -21,6 +21,7 @@ def _engine(**kwargs) -> NetworkEngine:
 # T8-001: bind address validation
 # ---------------------------------------------------------------------------
 
+
 def test_wildcard_bind_rejected() -> None:
     eng = _engine()
     with pytest.raises(NetworkBindingError, match="0.0.0.0"):
@@ -52,6 +53,7 @@ def test_allow_public_bind_flag_overrides() -> None:
 # T8-002: SSRF detection
 # ---------------------------------------------------------------------------
 
+
 def _gai(*ips: str) -> list:
     """Build a socket.getaddrinfo-shaped return value for the given IPs.
 
@@ -60,6 +62,7 @@ def _gai(*ips: str) -> list:
     longer evade detection.
     """
     import socket
+
     out = []
     for ip in ips:
         if ":" in ip:
@@ -71,51 +74,49 @@ def _gai(*ips: str) -> list:
 
 def test_loopback_is_ssrf_target() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("127.0.0.1")):
+    with patch("mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("127.0.0.1")):
         assert eng.is_ssrf_target("localhost") is True
 
 
 def test_rfc1918_10_is_ssrf_target() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("10.0.1.5")):
+    with patch("mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("10.0.1.5")):
         assert eng.is_ssrf_target("internal-host") is True
 
 
 def test_rfc1918_172_is_ssrf_target() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("172.16.5.1")):
+    with patch("mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("172.16.5.1")):
         assert eng.is_ssrf_target("host") is True
 
 
 def test_rfc1918_192_168_is_ssrf_target() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("192.168.0.1")):
+    with patch("mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("192.168.0.1")):
         assert eng.is_ssrf_target("host") is True
 
 
 def test_link_local_is_ssrf_target() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("169.254.169.254")):
+    with patch(
+        "mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("169.254.169.254")
+    ):
         assert eng.is_ssrf_target("metadata") is True
 
 
 def test_public_ip_not_ssrf_target() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("8.8.8.8")):
+    with patch("mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("8.8.8.8")):
         assert eng.is_ssrf_target("dns.google") is False
 
 
 def test_dns_error_returns_false_not_raises() -> None:
     eng = _engine()
     import socket
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               side_effect=socket.gaierror("nxdomain")):
+
+    with patch(
+        "mcp_armor.engines.network.socket.getaddrinfo", side_effect=socket.gaierror("nxdomain")
+    ):
         assert eng.is_ssrf_target("nonexistent.invalid") is False
 
 
@@ -124,8 +125,9 @@ def test_dns_error_returns_false_not_raises() -> None:
 # closed). gethostbyname (IPv4-only) would have missed the AAAA entirely.
 def test_regression_dual_stack_internal_aaaa_blocked() -> None:
     eng = _engine()
-    with patch("mcp_armor.engines.network.socket.getaddrinfo",
-               return_value=_gai("93.184.216.34", "::1")):
+    with patch(
+        "mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("93.184.216.34", "::1")
+    ):
         assert eng.is_ssrf_target("dual-stack.evil") is True
 
 
@@ -139,6 +141,7 @@ def test_block_rfc1918_disabled_always_false() -> None:
 # ---------------------------------------------------------------------------
 # Lifecycle hooks (pass-throughs)
 # ---------------------------------------------------------------------------
+
 
 async def test_on_request_passthrough() -> None:
     eng = _engine()
@@ -164,11 +167,13 @@ async def test_on_startup_passthrough() -> None:
 # Codex P1: on_startup validates bind_host when configured
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_on_startup_rejects_wildcard_bind_host() -> None:
     """P1: on_startup must raise NetworkBindingError when bind_host='0.0.0.0'."""
-    eng = NetworkEngine(allow_public_bind=False, block_rfc1918_ssrf=True,
-                        bind_host="0.0.0.0", bind_port=8080)
+    eng = NetworkEngine(
+        allow_public_bind=False, block_rfc1918_ssrf=True, bind_host="0.0.0.0", bind_port=8080
+    )
     with pytest.raises(NetworkBindingError, match="0.0.0.0"):
         await eng.on_startup()
 
@@ -176,8 +181,9 @@ async def test_regression_on_startup_rejects_wildcard_bind_host() -> None:
 @pytest.mark.asyncio
 async def test_regression_on_startup_allows_localhost_bind_host() -> None:
     """P1: on_startup must not raise when bind_host='127.0.0.1'."""
-    eng = NetworkEngine(allow_public_bind=False, block_rfc1918_ssrf=True,
-                        bind_host="127.0.0.1", bind_port=8080)
+    eng = NetworkEngine(
+        allow_public_bind=False, block_rfc1918_ssrf=True, bind_host="127.0.0.1", bind_port=8080
+    )
     await eng.on_startup()  # must not raise
 
 
@@ -191,6 +197,7 @@ async def test_regression_on_startup_no_bind_host_always_passes() -> None:
 # ---------------------------------------------------------------------------
 # Codex P1: on_request scans tools/call args for SSRF (T8-002)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_on_request_blocks_ssrf_url_in_args() -> None:

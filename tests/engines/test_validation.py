@@ -20,6 +20,7 @@ def _req(tool: str, arguments: dict, *, method: str = "tools/call"):
 # T3-001: size limit
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_oversized_payload_raises():
     engine = ValidationEngine(max_payload_bytes=10)
@@ -42,15 +43,19 @@ async def test_payload_within_limit_passes():
 # T3-002: command injection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "ls; rm -rf /",
-    "$(cat /etc/passwd)",
-    "foo | bar",
-    "cmd `whoami`",
-    "exec(os.system('ls'))",
-    "eval('import os')",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ls; rm -rf /",
+        "$(cat /etc/passwd)",
+        "foo | bar",
+        "cmd `whoami`",
+        "exec(os.system('ls'))",
+        "eval('import os')",
+    ],
+)
 async def test_regression_cmd_injection_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -63,14 +68,18 @@ async def test_regression_cmd_injection_blocked(value):
 # T3-003: path traversal
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "../etc/passwd",
-    "../../secret",
-    "/etc/passwd",
-    "%2e%2e/secret",
-    "..\\windows\\system32",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "../etc/passwd",
+        "../../secret",
+        "/etc/passwd",
+        "%2e%2e/secret",
+        "..\\windows\\system32",
+    ],
+)
 async def test_regression_path_traversal_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -83,13 +92,17 @@ async def test_regression_path_traversal_blocked(value):
 # T3-004: SQL injection
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "' OR '1'='1",
-    "'; DROP TABLE users; --",
-    "1 UNION SELECT * FROM secrets",
-    "1; DELETE FROM accounts",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "' OR '1'='1",
+        "'; DROP TABLE users; --",
+        "1 UNION SELECT * FROM secrets",
+        "1; DELETE FROM accounts",
+    ],
+)
 async def test_regression_sql_injection_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -163,11 +176,16 @@ async def test_schema_wrong_type_raises():
 
 @pytest.mark.asyncio
 async def test_schema_not_registered_strict_mode_fails_closed():
-    """P2: strict_schema=True with unregistered tool must fail closed — not skip silently."""
+    """strict_schema=True rejects a tool ABSENT from the observed tools/list
+    manifest. (Pre-manifest the gate is skipped to avoid the A1 self-DoS — see
+    tests/test_remediation_audit_2026_06_12.py::
+    test_regression_a1_no_self_dos_without_manifest — so a manifest is registered
+    first to exercise the fail-closed unknown-tool path.)"""
     engine = ValidationEngine(strict_schema=True)
+    engine.register_tools([{"name": "known_tool", "inputSchema": {}}])
     ctx = make_ctx()
     req = _req("unknown_tool", {"anything": "goes"})
-    with pytest.raises(ValidationError, match="no registered schema"):
+    with pytest.raises(ValidationError, match="not in the observed tools/list manifest"):
         await engine.on_request(ctx, req)
 
 
@@ -183,6 +201,7 @@ async def test_non_tools_call_method_skips_validation():
 # ---------------------------------------------------------------------------
 # register_tools
 # ---------------------------------------------------------------------------
+
 
 def test_register_tools_stores_schemas():
     engine = ValidationEngine()
@@ -201,6 +220,7 @@ def test_register_tools_stores_schemas():
 # ---------------------------------------------------------------------------
 # FIX[2]: Non-dict arguments must be rejected, not silently skipped
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_regression_non_dict_arguments_raises():
@@ -244,6 +264,7 @@ async def test_none_arguments_passes():
 # FIX[7]: Nested strings inside lists and dicts must be scanned
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_nested_list_injection_blocked():
     """Injection inside a list element must be caught."""
@@ -277,13 +298,17 @@ async def test_regression_deeply_nested_injection_blocked():
 # FIX[4]: SQL -- comment patterns
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "SELECT 1--\nDROP TABLE users",
-    "admin'-- comment here",
-    "' OR 1=1--x",
-    "username--",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "SELECT 1--\nDROP TABLE users",
+        "admin'-- comment here",
+        "' OR 1=1--x",
+        "username--",
+    ],
+)
 async def test_regression_sql_inline_comment_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -296,14 +321,18 @@ async def test_regression_sql_inline_comment_blocked(value):
 # FIX[5]: Shell redirect and Windows bypass patterns
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "ls > /tmp/out",
-    "ls < /etc/passwd",
-    "${IFS}whoami",
-    "cmd /c dir",
-    "%COMSPEC%",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ls > /tmp/out",
+        "ls < /etc/passwd",
+        "${IFS}whoami",
+        "cmd /c dir",
+        "%COMSPEC%",
+    ],
+)
 async def test_regression_cmd_redirect_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -316,14 +345,18 @@ async def test_regression_cmd_redirect_blocked(value):
 # FIX[6]: Sensitive path patterns beyond /etc/passwd
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "/etc/crontab",
-    "/etc/environment",
-    "/root/.ssh/id_rsa",
-    "/home/user/.ssh/authorized_keys",
-    "C:\\Windows\\System32\\cmd.exe",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/etc/crontab",
+        "/etc/environment",
+        "/root/.ssh/id_rsa",
+        "/home/user/.ssh/authorized_keys",
+        "C:\\Windows\\System32\\cmd.exe",
+    ],
+)
 async def test_regression_sensitive_path_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -336,12 +369,16 @@ async def test_regression_sensitive_path_blocked(value):
 # FIX[8]: SQL numeric tautology
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", [
-    "1 OR 1=1",
-    "0 OR 0=0",
-    "1 AND 2=2",
-])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "1 OR 1=1",
+        "0 OR 0=0",
+        "1 AND 2=2",
+    ],
+)
 async def test_regression_sql_numeric_tautology_blocked(value):
     engine = ValidationEngine()
     ctx = make_ctx()
@@ -354,13 +391,17 @@ async def test_regression_sql_numeric_tautology_blocked(value):
 # Codex P2: strict_schema fail-closed on unregistered tools
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_strict_schema_unregistered_tool_raises() -> None:
-    """P2: strict_schema=True with no registered schema must fail closed (T3-005)."""
+    """strict_schema=True fails closed for a tool not in the observed manifest
+    (T3-005). A manifest must be registered first — pre-manifest the schema gate
+    is skipped to avoid the A1 self-DoS, not hard-rejected."""
     engine = ValidationEngine(strict_schema=True)
+    engine.register_tools([{"name": "known_tool", "inputSchema": {}}])
     ctx = make_ctx()
     req = _req("unregistered_tool", {"param": "value"})
-    with pytest.raises(ValidationError, match="no registered schema"):
+    with pytest.raises(ValidationError, match="not in the observed tools/list manifest"):
         await engine.on_request(ctx, req)
 
 
@@ -380,14 +421,18 @@ async def test_regression_strict_schema_registered_empty_schema_passes() -> None
 async def test_regression_strict_schema_registered_schema_enforced() -> None:
     """P2: strict_schema=True with registered schema must reject invalid args."""
     engine = ValidationEngine(strict_schema=True)
-    engine.register_tools([{
-        "name": "my_tool",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"q": {"type": "string"}},
-            "required": ["q"],
-        },
-    }])
+    engine.register_tools(
+        [
+            {
+                "name": "my_tool",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            }
+        ]
+    )
     ctx = make_ctx()
     req = _req("my_tool", {"not_q": "wrong"})
     with pytest.raises(ValidationError):

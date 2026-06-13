@@ -119,8 +119,10 @@ app = guard.asgi(fastapi_app)
 dispatcher = guard.wrap_dispatcher(my_dispatcher)
 ```
 
-The wrapper handles all cross-cutting concerns: T1 (auth on every request), T7 (session
-binding), T8 (bind address check at startup), T12 (audit opens/closes per call).
+The wrapper handles all cross-cutting concerns: T1 (auth on every request, including DPoP
+sender-constraint via the access-token `cnf.jkt` claim), T7 (transport-bound session
+continuity), T8 (bind address check at startup via `bind_host`/`bind_port`), T12 (audit
+opens/closes per call).
 
 ### B — Per-Tool Decorator (fine-grained policy)
 
@@ -196,11 +198,14 @@ threats:
 
   T7:
     enabled: true
-    bind_session_to_dpop: true
+    # transport-bound session CONTINUITY only — DPoP sender-constraint is
+    # enforced by T1 via the access-token cnf.jkt claim, not here.
 
   T8:
     enabled: true
-    allow_public_bind: false          # 0.0.0.0 → error at startup
+    bind_host: 127.0.0.1              # advertised server bind host
+    bind_port: 8080                  # advertised server bind port
+    allow_public_bind: false          # 0.0.0.0 (or any public bind_host) → NetworkBindingError at guard.startup()
     block_rfc1918: true               # SSRF guard via tools
 
   T9:
@@ -292,6 +297,31 @@ class ProtectionEngine(Protocol):
 
 ---
 
+## Design Principles (v1.1.0 additions)
+
+**T3 schema is auto-registered from the observed manifest.** On the adapter path,
+`ValidationEngine.on_response` captures each tool's `inputSchema` directly from the
+observed `tools/list` response — mirroring how `IntegrityEngine` (T6) and
+`SupplyChainEngine` (T11) baseline from the same response. No manual
+`register_tool_schemas()` call is required; subsequent `tools/call` requests are
+validated against the auto-registered schema in strict mode. (The per-tool decorator's
+explicit `input_schema=` still applies on the decorator path.)
+
+**T8 public-bind check is wired through config.** The advertised `bind_host`/`bind_port`
+(T8 config keys) are checked by `guard.startup()`, which raises `NetworkBindingError` on a
+`0.0.0.0` / public bind unless `allow_public_bind: true`.
+
+**T12 rollback-to-empty is closed.** Deleting the audit log while the `.hwm` /
+`.hmac_enabled` sticky markers survive now raises `AuditChainError` at startup — an
+attacker cannot reset the chain to empty and silently restart logging.
+
+**T12 HMAC key is required at startup.** When T12 is enabled, `ARMOR_AUDIT_HMAC_KEY` must
+be present (`require_hmac_key` defaults to `true`); development may opt out explicitly.
+
+**Response engines (T4/T5/T9) are BLOCK-only.** When a response engine fires, it raises and
+an opaque error replaces the entire response — it does not redact in place. Explicit
+redaction is a separate, opt-in helper: `TrustEngine.sanitize()`.
+
 ## Design Principles (v0.2.0 additions)
 
 **Async-safe audit writes.** All audit I/O is dispatched via `asyncio.to_thread`. An
@@ -300,7 +330,9 @@ loop is never blocked and concurrent coroutines cannot produce duplicate `prev_h
 values.
 
 **`dry_run` is explicitly NOT FOR PRODUCTION.** The `dry_run` mode exists solely for
-configuration tuning in non-production environments. When active, all security
+configuration tuning in non-production environments. It is refused outright unless
+`ARMOR_ALLOW_DRY_RUN=1` is set in the environment — by default, requesting `dry_run`
+raises rather than silently downgrading enforcement. When active, all security
 violations are logged at WARNING and audited as `"dry_run_violation"` events, but no
 request is blocked (except auth errors — those always re-raise). Both the guard
 constructor and the config loader log a WARNING when dry_run is activated. The flag
@@ -308,9 +340,13 @@ name and all docs emphasize: NOT FOR PRODUCTION.
 
 **HMAC audit chain integrity is the default production posture.** Pure SHA-256 chaining
 detects field tampering but not log truncation followed by chain recalculation. Setting
-`ARMOR_AUDIT_HMAC_KEY` closes this gap. The `.hmac_enabled` sticky marker prevents a
-subsequent deployment from silently downgrading integrity by omitting the key. This
-makes HMAC enforcement sticky — once enabled, it cannot be removed accidentally.
+`ARMOR_AUDIT_HMAC_KEY` closes this gap, and as of v1.1.0 it is **required at startup**
+whenever T12 is enabled (`require_hmac_key` defaults to `true`; development may opt out
+explicitly). The `.hmac_enabled` sticky marker prevents a subsequent deployment from
+silently downgrading integrity by omitting the key. This makes HMAC enforcement sticky —
+once enabled, it cannot be removed accidentally. Separately, deleting the log while the
+`.hwm` / `.hmac_enabled` markers survive raises `AuditChainError` at startup, closing the
+rollback-to-empty path.
 
 ---
 

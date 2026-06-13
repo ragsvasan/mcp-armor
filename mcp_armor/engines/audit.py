@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac as _hmac
 import json
+import logging
 import os
 import threading
 import time
@@ -15,6 +16,8 @@ from pathlib import Path
 from ..context import CoSAIContext
 from ..exceptions import AuditChainError
 from ..types import MCPRequest, MCPResponse
+
+log = logging.getLogger("mcp_armor.audit")
 
 # Fields included in the chain hash — every auditable field except chain_hash itself.
 # F6 fix: `seq` (monotonic 0-based sequence number) is part of the hashed body so
@@ -243,9 +246,14 @@ class AuditEngine:
         self,
         path: str | Path = "/var/log/mcp-armor/audit.jsonl",
         verify_on_startup: bool = True,
+        require_hmac: bool = False,
     ) -> None:
         self._path = Path(path)
         self._verify_on_startup = verify_on_startup
+        # A6: when True, on_startup refuses to start without ARMOR_AUDIT_HMAC_KEY
+        # (unless ARMOR_AUDIT_ALLOW_UNSIGNED=1). Defaults False so direct/test
+        # construction is unaffected; the production from_config path passes True.
+        self._require_hmac = require_hmac
         self._lock = threading.Lock()
         # Fix 1 (concurrent writes): async callers must hold this lock across
         # _write() + asyncio.to_thread(I/O) so seq assignment and disk write
@@ -273,23 +281,84 @@ class AuditEngine:
         if not raw:
             return None
         try:
-            return bytes.fromhex(raw)
+            key = bytes.fromhex(raw)
         except ValueError as exc:
             raise ConfigError(
                 f"{env_var} is not valid hex-encoded bytes — "
                 "set it to a hex string (e.g. openssl rand -hex 32)"
             ) from exc
+        # 256-bit floor — matches the HMAC-SHA256 output width and the session
+        # signer's _MIN_SECRET_BYTES. A short key (e.g. ARMOR_AUDIT_HMAC_KEY=00)
+        # would pass the A6 not-None gate while providing trivial key strength.
+        if len(key) < 32:
+            raise ConfigError(
+                f"{env_var} is too short ({len(key)} bytes) — minimum 32 bytes "
+                "(256 bits) for HMAC-SHA256 (e.g. openssl rand -hex 32)"
+            )
+        return key
 
     async def on_startup(self) -> None:
-        # Fix 1: create the async lock inside a running event loop.
-        self._async_lock = asyncio.Lock()
-        # Fix 11: create HMAC-enabled marker file on first startup with key set.
+        # A6: require an HMAC signing key unless explicitly opted out. Without it
+        # the chain is forgeable by anyone with write access to the log. This
+        # fail-fast check runs BEFORE _async_lock is created so a refused startup
+        # leaves the engine fully uninitialised (no half-started state that a
+        # caller could write genesis records into after catching the error).
+        if (
+            self._require_hmac
+            and self._hmac_key is None
+            and os.environ.get("ARMOR_AUDIT_ALLOW_UNSIGNED") != "1"
+        ):
+            raise AuditChainError(
+                "T12 audit is enabled but ARMOR_AUDIT_HMAC_KEY is not set — the "
+                "hash chain would be tamper-evident but forgeable (truncate-and-"
+                "recompute). Set ARMOR_AUDIT_HMAC_KEY (e.g. `openssl rand -hex 32`), "
+                "or set ARMOR_AUDIT_ALLOW_UNSIGNED=1 / T12.require_hmac_key=false "
+                "to accept an unsigned chain in a dev profile."
+            )
         await asyncio.to_thread(self._path.parent.mkdir, parents=True, exist_ok=True)
         marker = Path(str(self._path) + ".hmac_enabled")
+        # A4: rollback-to-empty detection. The chain verification (which holds
+        # the HWM-absent guard) only runs when the log file exists, so an
+        # attacker who deletes the log makes path.exists() False and startup
+        # would otherwise seed from empty with NO verification. The HWM sidecar
+        # and the .hmac_enabled marker persist independently of the log, so if
+        # either survives while the log is gone the full history was erased —
+        # refuse to start instead of silently re-seeding an empty chain.
+        if self._verify_on_startup and not self._path.exists():
+            if self._hwm_path.exists() or marker.exists():
+                raise AuditChainError(
+                    "Audit log is absent but its high-water-mark sidecar / HMAC "
+                    "marker still exists — the log was deleted or rolled back to "
+                    "empty (T12-002). Restore the log, or remove "
+                    f"{self._hwm_path} and {marker} to acknowledge the loss."
+                )
+        # A6 (honesty): the silent-failure combination — no key, chain verify
+        # disabled, but a .hmac_enabled marker present — means a truncate-and-
+        # recompute attack is undetectable on this boot. Surface it loudly.
+        if self._hmac_key is None and marker.exists() and not self._verify_on_startup:
+            log.error(
+                "SECURITY: HMAC key absent, chain_verify_on_startup disabled, and a "
+                ".hmac_enabled marker is present — truncate-and-recompute tampering is "
+                "undetectable on this startup. Restore ARMOR_AUDIT_HMAC_KEY or re-enable "
+                "chain_verify_on_startup."
+            )
+        # Fix 11: create HMAC-enabled marker file on first startup with key set.
         if self._hmac_key is not None and not marker.exists():
             marker.touch()
+        # Create the async lock only after all fail-fast checks pass, so a refused
+        # startup never leaves a partially-initialised engine.
+        self._async_lock = asyncio.Lock()
         if self._verify_on_startup and self._path.exists():
-            await self._verify_chain_async()
+            # The log existed at the check above; guard the TOCTOU window where a
+            # concurrent deleter removes it before verification opens it — surface
+            # as a tamper alarm, not a bare FileNotFoundError.
+            try:
+                await self._verify_chain_async()
+            except FileNotFoundError as exc:
+                raise AuditChainError(
+                    "Audit log vanished between the existence check and verification "
+                    "— possible concurrent deletion (T12-002)"
+                ) from exc
         else:
             await self._seed_state()
 

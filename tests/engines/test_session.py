@@ -22,7 +22,7 @@ _SECRET = b"k" * _MIN_SECRET_BYTES
 
 
 def _engine(secret: bytes = _SECRET) -> SessionEngine:
-    return SessionEngine(bind_to_dpop=False, signer=SessionSigner(secret))
+    return SessionEngine(signer=SessionSigner(secret))
 
 
 def _ctx_for(eng: SessionEngine, transport: str = "http"):
@@ -34,6 +34,7 @@ def _ctx_for(eng: SessionEngine, transport: str = "http"):
 # --------------------------------------------------------------------------- #
 # Fixation prevention (T7-001)
 # --------------------------------------------------------------------------- #
+
 
 async def test_minted_session_passes_on_request() -> None:
     eng = _engine()
@@ -71,6 +72,7 @@ async def test_initialize_on_minted_session_passes() -> None:
 # Cross-instance survival — the production incident
 # --------------------------------------------------------------------------- #
 
+
 async def test_session_minted_on_one_engine_verifies_on_another() -> None:
     """Instance A mints, request lands on instance B (fresh SessionEngine, same
     secret). The store-based engine raised T7-001 here; the signed token must
@@ -96,6 +98,7 @@ async def test_session_rejected_across_engines_with_different_secret() -> None:
 # --------------------------------------------------------------------------- #
 # Cross-transport replay (T7-003)
 # --------------------------------------------------------------------------- #
+
 
 async def test_same_transport_passes() -> None:
     eng = _engine()
@@ -125,6 +128,7 @@ async def test_stdio_session_round_trip_does_not_raise() -> None:
 # --------------------------------------------------------------------------- #
 # URL session_id leak (T7-002) — preserved from the store model
 # --------------------------------------------------------------------------- #
+
 
 def _url_req(token: str, params: dict) -> MCPRequest:
     return MCPRequest(
@@ -163,6 +167,7 @@ async def test_unrelated_url_params_allowed() -> None:
 # Stateless model (T7-004)
 # --------------------------------------------------------------------------- #
 
+
 async def test_session_start_and_end_are_noops() -> None:
     eng = _engine()
     ctx, _ = _ctx_for(eng)
@@ -187,6 +192,7 @@ async def test_stateless_no_server_side_revocation() -> None:
 # Guard integration — mint_session_id wiring
 # --------------------------------------------------------------------------- #
 
+
 async def test_guard_mint_session_id_uses_session_engine_signer() -> None:
     eng = _engine()
     guard = CoSAIGuard([eng])
@@ -205,7 +211,7 @@ def test_guard_mint_session_id_falls_back_to_uuid_without_session_engine() -> No
 def test_session_engine_construction_fails_closed_without_secret(monkeypatch) -> None:
     monkeypatch.delenv("ARMOR_SESSION_SECRET", raising=False)
     with pytest.raises(RuntimeError, match="ARMOR_SESSION_SECRET is not set"):
-        SessionEngine(bind_to_dpop=False)
+        SessionEngine()
 
 
 async def test_regression_protect_tool_works_with_t7_session_engine_enabled() -> None:

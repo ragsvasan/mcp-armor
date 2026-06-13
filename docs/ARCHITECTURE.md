@@ -179,7 +179,7 @@ mcp_armor/adapters/
 
 **ArmorMiddleware (ASGI):** intercepts the raw HTTP body, parses JSON-RPC, runs the request chain, replays the body to the downstream app, captures the response, runs the response chain. Compatible with FastAPI, Starlette, and any other ASGI-compliant framework.
 
-**wrap_dispatcher:** the lowest-level integration. Wraps any `async (dict) -> dict` function. Useful for custom transports, stdio servers, and testing.
+**wrap_dispatcher:** the lowest-level integration. Wraps any `async (dict) -> dict` function. Useful for custom transports, stdio servers, and testing. It mints a **fresh session per call** (start → request → response → end around each invocation), so it is a single-call session with no cross-call state: T6 manifest/drift, T10 budget, and T7 continuity do not accumulate across dispatcher calls. Use the ASGI/FastMCP adapters when multi-call session state is required.
 
 **wrap_fastmcp:** wraps a `fastmcp.FastMCP` instance. Validates the type at call time,
 hooks into tool dispatch via `_GuardedToolDispatcher`, and guarantees `close_session` fires
@@ -199,13 +199,13 @@ mcp_armor/
 
   engines/
     base.py            ProtectionEngine Protocol (runtime_checkable)
-    auth.py            T1: bearer token + DPoP validation
+    auth.py            T1: bearer token + DPoP sender-constraint (access-token cnf.jkt)
     authz.py           T2: per-tool RBAC, confused deputy prevention
     validation.py      T3: JSON schema strict mode + injection guards
     boundary.py        T4: 24 injection patterns, request + response scan (incl. manifest descriptions)
     protection.py      T5: PII scrubbing (5 RE2-based profiles)
     integrity.py       T6: SHA-256 manifest hash + drift detection
-    session.py         T7: session binding, fixation prevention
+    session.py         T7: transport-bound session continuity, fixation prevention
     network.py         T8: bind address check + SSRF prevention
     trust.py           T9: 5-step LLM output sanitizer
     resources.py       T10: call budget, wall-clock, loop depth
@@ -348,3 +348,35 @@ The T12 `AuditEngine` writes a hash-chained JSON Lines file:
   `ARMOR_AUDIT_HMAC_KEY` is in the environment; prevents log-truncation-and-recalculation
 - `verify_chain()` walks the file and raises `AuditChainError` at the first broken link,
   sequence gap, or HMAC mismatch
+
+---
+
+## Session State Is In-Process — Scaling Caveat
+
+The T6 manifest/drift baseline, the T10 call budget, and T7 session continuity are all
+held **in the worker process's memory**. With `workers > 1` behind a load balancer, this
+state is **fail-open**: an attacker can route a second `tools/list` to a different worker
+that holds no baseline, escaping T6 drift detection (and likewise split budget/continuity
+across workers).
+
+For horizontally-scaled deployments, either run a **single worker**, or back the session
+store with a **shared store** so T6/T7/T10 state is consistent across workers. The default
+in-process store is correct only for single-worker deployments.
+
+---
+
+## Performance
+
+Measured on Apple M5, 20,000 iterations, via `benchmarks/chain_overhead.py`:
+
+| Configuration | Engines | p50 | p99 |
+|---|---|---|---|
+| CPU scanning chain (no audit I/O) | 10 | ~115 µs | ~158 µs |
+| Full chain incl. T12 audit disk I/O | 11 | ~608 µs | ~810 µs |
+
+Notes:
+- RE2 patterns are compiled **once at engine init**, not per request — pattern compilation
+  is not in the hot path.
+- The T12 audit writes **2 disk records per call** (request + response) via
+  `asyncio.to_thread`. This disk I/O dominates the full-chain figure; the CPU scanning
+  chain (T1–T11, no audit I/O) is roughly 5× cheaper.

@@ -30,6 +30,7 @@ def _signer(secret: bytes = _SECRET) -> SessionSigner:
 # Sunny day
 # --------------------------------------------------------------------------- #
 
+
 def test_mint_then_verify_roundtrips() -> None:
     s = _signer()
     token = s.mint("http")
@@ -47,6 +48,7 @@ def test_token_shape_is_nonce_dot_sig() -> None:
 # --------------------------------------------------------------------------- #
 # Realistic — the production incident this fix exists for
 # --------------------------------------------------------------------------- #
+
 
 def test_token_verifies_on_a_DIFFERENT_signer_with_same_secret() -> None:
     """Instance A mints; instance B (fresh process, same secret) must accept it.
@@ -72,16 +74,17 @@ def test_token_rejected_when_other_instance_has_a_different_secret() -> None:
 # Corner cases — malformed tokens
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.parametrize(
     "bad",
     [
-        "",                       # empty
-        "no-dot-at-all",          # missing separator
-        ".",                      # both parts empty
-        "nonce.",                 # empty sig
-        ".sig",                   # empty nonce
-        "a.b.c",                  # too many parts
-        "nonce.sig.",             # trailing dot → 3 parts
+        "",  # empty
+        "no-dot-at-all",  # missing separator
+        ".",  # both parts empty
+        "nonce.",  # empty sig
+        ".sig",  # empty nonce
+        "a.b.c",  # too many parts
+        "nonce.sig.",  # trailing dot → 3 parts
     ],
 )
 def test_malformed_token_rejected(bad: str) -> None:
@@ -92,6 +95,7 @@ def test_malformed_token_rejected(bad: str) -> None:
 # --------------------------------------------------------------------------- #
 # Flakiness guards
 # --------------------------------------------------------------------------- #
+
 
 def test_mint_is_unique_per_call() -> None:
     s = _signer()
@@ -109,6 +113,7 @@ def test_verify_is_deterministic_not_time_dependent() -> None:
 # --------------------------------------------------------------------------- #
 # Adversarial
 # --------------------------------------------------------------------------- #
+
 
 def test_forged_signature_rejected() -> None:
     s = _signer()
@@ -152,6 +157,7 @@ def test_signature_swap_between_two_tokens_rejected() -> None:
 # --------------------------------------------------------------------------- #
 # Fail-closed construction
 # --------------------------------------------------------------------------- #
+
 
 def test_short_secret_rejected_at_construction() -> None:
     with pytest.raises(ValueError, match="too short"):

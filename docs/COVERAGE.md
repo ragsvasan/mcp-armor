@@ -1,7 +1,7 @@
 # mcp-armor — Coverage Status
 
-**Version:** 0.2.0  
-**Date:** 2026-05-28  
+**Version:** 1.1.0  
+**Date:** 2026-06-12  
 **Tests:** 563 passing · Coverage: 90%+
 
 All 12 CoSAI threat engines are fully implemented and tested. No stubs remain.
@@ -52,6 +52,7 @@ asserts the client receives only an opaque error, never the sensitive or injecte
 | Shell metacharacters in arguments | T3-002 | ✅ Done | `ValidationEngine` | `test_shell_injection_in_args_rejected` |
 | Path traversal | T3-003 | ✅ Done | `ValidationEngine` | `test_path_traversal_in_args_rejected` |
 | SQL injection | T3-004 | ✅ Done | `ValidationEngine` | `test_sql_injection_in_args_rejected` |
+| JSON-Schema violation (auto-registered from `tools/list`) | T3-006 | ✅ Done | `ValidationEngine` + adapter | `test_regression_a1_input_schema_violation_blocked`, `test_regression_a1_valid_tools_call_passes_after_tools_list` |
 | Injection in tool definitions | T4-001 | ✅ Done | `BoundaryEngine` | `test_owasp_a01_ignore_previous_instructions` |
 | Role-override preamble | T4-002 | ✅ Done | `BoundaryEngine` | `test_owasp_a04_you_are_now` |
 | System prompt reveal | T4-003 | ✅ Done | `BoundaryEngine` | `test_owasp_a06_system_prompt` |
@@ -105,9 +106,12 @@ asserts the client receives only an opaque error, never the sensitive or injecte
 
 These are deliberate design choices, not bugs.
 
-**T5 — blocks, does not redact.** When PII is detected in a tool response the entire
-response is blocked. There is no scrub-and-forward mode. This is the conservative choice
-for 0.1.0; redaction support is planned for a future release.
+**T4 / T5 / T9 — response engines block, they do not scrub.** When PII, a secret, or an
+injection pattern is detected in a tool response, the **entire** response is blocked: an
+opaque error replaces the whole body. The engines do not redact, strip, or sanitize content
+in place and forward it. The only in-place redaction is `TrustEngine.sanitize()`, which is
+an explicit operator call — not part of the automatic response path. Scrub-and-forward
+redaction support is planned for a future release.
 
 **T6 — drift detection is per-call-chain only on the HTTP adapter.** `ArmorMiddleware`
 creates a fresh `CoSAIContext` per HTTP request and does not restore session state between
@@ -137,15 +141,22 @@ external API. All coverage matrix entries remain Done. What changed internally:
 - File I/O dispatched via `asyncio.to_thread` — the event loop is never blocked.
 - `asyncio.Lock` wraps seq-assignment + disk write atomically, fixing a concurrent-write
   race that could produce duplicate `prev_hash` values under load.
-- Optional HMAC signing: set `ARMOR_AUDIT_HMAC_KEY` (64-char hex / 32 bytes) to add an
+- HMAC signing: set `ARMOR_AUDIT_HMAC_KEY` (64-char hex / 32 bytes) to add an
   unforgeable `chain_hmac` field to every record, closing the log-truncation-and-
-  recalculation gap in pure SHA-256 chaining.
+  recalculation gap in pure SHA-256 chaining. As of v1.1.0 this key is **required** at
+  startup when T12 is enabled (`T12.require_hmac_key` defaults to `true`); opt out for dev
+  only with `require_hmac_key: false` or `ARMOR_AUDIT_ALLOW_UNSIGNED=1`.
 - `ARMOR_AUDIT_HMAC_KEY_PREV` supports zero-downtime key rotation: old records verified
   with the previous key are accepted with a WARNING.
 - `.hmac_enabled` sticky marker file: once HMAC is written, startup rejects a missing
   key rather than silently downgrading integrity protection.
 - HMAC key validated at `__init__` (not per-record); invalid hex raises `ConfigError` at
   startup.
+
+### Audit chain — rollback-to-empty closed (v1.1.0)
+- Deleting the audit log while the `.hwm` sidecar or the `.hmac_enabled` marker survives now
+  raises `AuditChainError` at startup. An attacker can no longer reset the chain to an empty
+  state to erase prior history.
 
 ### BoundaryEngine (T4)
 - Normalization pipeline added before pattern matching: whitespace collapse, zero-width
@@ -178,6 +189,32 @@ external API. All coverage matrix entries remain Done. What changed internally:
 - `load_config()` emits a WARNING log immediately when `dry_run: true` is parsed.
 - `asyncio.get_event_loop()` replaced with `asyncio.get_running_loop()` throughout —
   avoids the deprecated API and the wrong-loop bug in coroutine context.
+
+---
+
+## Hardening Changes (v1.1.0 — audit remediation)
+
+### ValidationEngine (T3) — schema enforcement now LIVE
+- JSON-Schema validation is enforced on the adapter path. Each tool's `inputSchema`
+  auto-registers from the observed `tools/list` response (`ValidationEngine.on_response`);
+  operators do **not** call `register_tool_schemas()` manually. A schema-valid `tools/call`
+  passes; a violation is rejected with JSON-RPC `-32602`. Previously the schema check was
+  defined but never invoked (a latent self-DoS).
+
+### SessionEngine (T7) — transport continuity only
+- T7 enforces transport-bound session **continuity** (a session on one transport cannot be
+  replayed over another). The former `bind_session_to_dpop` / `bind_to_dpop` flag was
+  removed and is now an unknown config key. DPoP sender-constraint (proof-of-possession) is
+  enforced at **T1** by `AuthEngine` via the access token's `cnf.jkt` claim, not by T7.
+
+### NetworkEngine (T8) — startup bind check wired
+- The startup public-bind check is wired via T8 config keys `bind_host` / `bind_port`. When
+  `bind_host` is set, `guard.startup()` raises `NetworkBindingError` on a public bind (e.g.
+  `0.0.0.0`) unless `allow_public_bind: true`. Per-request SSRF inspection is always on.
+
+### SupplyChainEngine (T11) — registry signatures stay opt-in
+- Ed25519 registry-signature verification remains **opt-in** (`require_registry_signature`
+  defaults to `false`). Only the T12 audit-chain HMAC key is mandatory by default.
 
 ---
 

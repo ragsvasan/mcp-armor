@@ -27,28 +27,63 @@ _IPV6_LINK_LOCAL = ipaddress.ip_network("fe80::/10")
 _IPV6_UNSPEC = ipaddress.ip_network("::/128")
 _CLOUD_METADATA = ipaddress.ip_network("169.254.169.254/32")
 _BLOCKED_NETWORKS = _RFC1918 + [
-    _LOOPBACK, _LINK_LOCAL, _IPV6_ULA,
-    _IPV6_LOOPBACK, _IPV6_LINK_LOCAL, _IPV6_UNSPEC, _CLOUD_METADATA,
+    _LOOPBACK,
+    _LINK_LOCAL,
+    _IPV6_ULA,
+    _IPV6_LOOPBACK,
+    _IPV6_LINK_LOCAL,
+    _IPV6_UNSPEC,
+    _CLOUD_METADATA,
 ]
 
 # F3: any scheme that can reference a network host is in scope for SSRF —
 # not just http/ftp/ws. Schemes that take an authority are scanned via
 # urlsplit; schemes that embed a host without an authority (no //) are
 # explicitly blocked because they cannot be safely host-resolved here.
-_HOST_SCHEMES: frozenset[str] = frozenset({
-    "http", "https", "ftp", "ftps", "ws", "wss",
-    "gopher", "redis", "rediss", "mongodb", "mysql", "postgres", "postgresql",
-    "ldap", "ldaps", "memcached", "amqp", "smb", "ssh", "sftp", "tftp",
-})
+_HOST_SCHEMES: frozenset[str] = frozenset(
+    {
+        "http",
+        "https",
+        "ftp",
+        "ftps",
+        "ws",
+        "wss",
+        "gopher",
+        "redis",
+        "rediss",
+        "mongodb",
+        "mysql",
+        "postgres",
+        "postgresql",
+        "ldap",
+        "ldaps",
+        "memcached",
+        "amqp",
+        "smb",
+        "ssh",
+        "sftp",
+        "tftp",
+    }
+)
 # Schemes with no network authority that are dangerous as fetch targets
 # (local file / process / data exfiltration vectors). Always rejected.
-_DENIED_SCHEMES: frozenset[str] = frozenset({
-    "file", "dict", "jar", "netdoc", "expect", "data", "php", "phar", "glob",
-})
+_DENIED_SCHEMES: frozenset[str] = frozenset(
+    {
+        "file",
+        "dict",
+        "jar",
+        "netdoc",
+        "expect",
+        "data",
+        "php",
+        "phar",
+        "glob",
+    }
+)
 
 # Coarse pre-filter: find anything that looks like a URI (scheme:rest) so we
 # can hand each candidate to urlsplit. Bracketed IPv6 literals are preserved.
-_URI_CANDIDATE_RE = re.compile(r'\b([a-zA-Z][a-zA-Z0-9+.\-]*):(//)?\S+')
+_URI_CANDIDATE_RE = re.compile(r"\b([a-zA-Z][a-zA-Z0-9+.\-]*):(//)?\S+")
 
 
 class NetworkEngine:
@@ -82,10 +117,32 @@ class NetworkEngine:
             self.check_bind_address(self._bind_host, self._bind_port)
 
     def check_bind_address(self, host: str, port: int) -> None:
-        """Call this from server startup with the configured bind host."""
-        if host in ("0.0.0.0", "::") and not self._allow_public_bind:
+        """Call this from server startup with the configured bind host.
+
+        Rejects any unspecified/wildcard address (binds to all interfaces) unless
+        allow_public_bind. A naive string compare against ("0.0.0.0", "::") missed
+        equivalent spellings — `[::]` (the common bracketed config form), `::0`,
+        `0:0:0:0:0:0:0:0` — so we parse with `ipaddress` and test `is_unspecified`.
+        """
+        if self._allow_public_bind:
+            return
+        candidate = host.strip()
+        if candidate.startswith("[") and candidate.endswith("]"):
+            candidate = candidate[1:-1]
+        try:
+            addr = ipaddress.ip_address(candidate)
+            # An IPv4-mapped IPv6 unspecified (::ffff:0.0.0.0) must be judged as
+            # its IPv4 form, otherwise it slips past is_unspecified.
+            if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+                addr = addr.ipv4_mapped
+            is_wildcard = addr.is_unspecified
+        except ValueError:
+            # Not an IP literal. socket treats bare "0" / "" as 0.0.0.0 (all
+            # interfaces); a hostname is left for the OS to resolve (not our gate).
+            is_wildcard = candidate in ("0", "")
+        if is_wildcard:
             raise NetworkBindingError(
-                f"Server must not bind to {host}:{port} — "
+                f"Server must not bind to {host}:{port} (all interfaces) — "
                 "use 127.0.0.1 or an explicit interface address"
             )
 
@@ -160,14 +217,12 @@ class NetworkEngine:
                 except ValueError as exc:
                     # Unparseable authority on a host-scheme — fail closed.
                     raise NetworkBindingError(
-                        f"Tool argument contains an unparseable {scheme!r} URL — "
-                        "rejected (T8-002)"
+                        f"Tool argument contains an unparseable {scheme!r} URL — rejected (T8-002)"
                     ) from exc
                 if not host:
                     # gopher://, redis:// etc. with no host we can vet — fail closed.
                     raise NetworkBindingError(
-                        f"Tool argument {scheme!r} URL has no resolvable host — "
-                        "rejected (T8-002)"
+                        f"Tool argument {scheme!r} URL has no resolvable host — rejected (T8-002)"
                     )
                 if self.is_ssrf_target(host):
                     raise NetworkBindingError(

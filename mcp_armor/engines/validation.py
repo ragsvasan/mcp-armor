@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+
 from ..context import CoSAIContext
 from ..exceptions import ValidationError
 from ..types import (
@@ -11,20 +14,22 @@ from ..types import (
     scannable_strings,
 )
 
+log = logging.getLogger(__name__)
+
 _MAX_PAYLOAD_BYTES = 65_536
 
 # T3-002: shell command injection
 _CMD_PATTERNS: tuple[str, ...] = (
     r"[;&|`]",
     r"\$\(",
-    r"\$\{",                           # ${VAR} and ${IFS} expansions
-    r"[<>]",                           # shell redirects
+    r"\$\{",  # ${VAR} and ${IFS} expansions
+    r"[<>]",  # shell redirects
     r"(?i)\bexec\s*\(",
     r"(?i)\beval\s*\(",
     r"(?i)\bsystem\s*\(",
     r"(?i)\bpopen\s*\(",
-    r"(?i)\bcmd\s*/[cCkK]\b",         # Windows cmd /c
-    r"(?i)%[A-Za-z_][A-Za-z_0-9]*%", # Windows %ENVVAR%
+    r"(?i)\bcmd\s*/[cCkK]\b",  # Windows cmd /c
+    r"(?i)%[A-Za-z_][A-Za-z_0-9]*%",  # Windows %ENVVAR%
 )
 
 # T3-003: path traversal
@@ -46,7 +51,7 @@ _SQL_PATTERNS: tuple[str, ...] = (
     r"(?i)\b(OR|AND)\s+\d+\s*=\s*\d+",  # numeric tautology: OR 1=1
     r"(?i);\s*(?:DROP|DELETE|TRUNCATE|INSERT|UPDATE|ALTER|CREATE)\s+",
     r"(?i)UNION\s+(?:ALL\s+)?SELECT",
-    r"--",                              # SQL comment (all forms)
+    r"--",  # SQL comment (all forms)
     r"(?i)/\*.*?\*/",
     r"(?i)\bXP_\w+",
     r"(?i)WAITFOR\s+DELAY",
@@ -82,17 +87,30 @@ class ValidationEngine:
         self._max_payload_bytes = max_payload_bytes
         self._strict_schema = strict_schema
         self._tool_schemas: dict[str, dict] = {}
+        # Guards _tool_schemas — on_response auto-registration can run on multiple
+        # concurrent asyncio tasks (one per session); the lock keeps registration
+        # from interleaving partial writes.
+        self._schema_lock = threading.Lock()
         self._cmd = _compile(_CMD_PATTERNS)
         self._path = _compile(_PATH_PATTERNS)
         self._sql = _compile(_SQL_PATTERNS)
 
     def register_tools(self, tools: list[dict]) -> None:
-        """Populate tool input schemas from a tools/list result. Called by CoSAIGuard."""
-        for tool in tools:
-            name = tool.get("name", "")
-            schema = tool.get("inputSchema") or {}
-            if name:
-                self._tool_schemas[name] = schema
+        """Populate tool input schemas from a tools/list result.
+
+        First-write-wins per tool name: the FIRST observed manifest is the trusted
+        baseline (the same baseline IntegrityEngine snapshots for T6 drift). A
+        later or attacker-influenced tools/list cannot silently relax an already
+        registered schema — that would let a drifted/poisoned manifest weaken
+        strict-schema enforcement process-wide (the store is shared across
+        sessions). Mid-session manifest *change* is the rug-pull IntegrityEngine
+        (T6) detects; here we simply refuse to downgrade.
+        """
+        with self._schema_lock:
+            for tool in tools:
+                name = tool.get("name", "")
+                if name and name not in self._tool_schemas:
+                    self._tool_schemas[name] = tool.get("inputSchema") or {}
 
     def _scan_injection(self, value: str, field: str) -> None:
         for pat in self._cmd:
@@ -168,9 +186,7 @@ class ValidationEngine:
         # no scannable field was extracted (empty/abnormal params).
         raw = str(req.params)
         if len(raw.encode()) > self._max_payload_bytes:
-            raise ValidationError(
-                f"Payload exceeds {self._max_payload_bytes} bytes"
-            )
+            raise ValidationError(f"Payload exceeds {self._max_payload_bytes} bytes")
 
         arguments = req.params.get("arguments")
         tool_name = str(req.params.get("name", ""))
@@ -178,8 +194,7 @@ class ValidationEngine:
         # T3-002/003/004: reject non-dict, non-None arguments outright (cannot scan safely)
         if arguments is not None and not isinstance(arguments, dict):
             raise ValidationError(
-                f"Tool {tool_name!r}: 'arguments' must be an object, "
-                f"got {type(arguments).__name__}"
+                f"Tool {tool_name!r}: 'arguments' must be an object, got {type(arguments).__name__}"
             )
 
         # Recursively scan all string values including nested lists/dicts.
@@ -194,22 +209,56 @@ class ValidationEngine:
                 )
             self._scan_injection(uri, "uri")
 
-        # T3-005: JSON schema validation — only applies to tool calls; other
-        # content methods have no registered input schema. Fail closed on
-        # tools/call as before.
+        # T3-005: JSON schema validation — only applies to tool calls. Schemas
+        # are auto-registered from the observed tools/list response (on_response).
         if self._strict_schema and req.method == "tools/call":
-            if tool_name not in self._tool_schemas:
-                raise ValidationError(
-                    f"Tool {tool_name!r} has no registered schema — "
-                    "call register_tool_schemas() before dispatching (T3-005)"
+            if not self._tool_schemas:
+                # No manifest has been observed on this engine instance yet. This
+                # happens on paths that don't route tools/list through this guard
+                # before tools/call: the per-call dispatcher adapter, the FastMCP
+                # decorator (_GuardedToolDispatcher), a multi-worker deployment
+                # where tools/list landed on another worker, or a client that
+                # cached the manifest. Hard-rejecting here is exactly the A1
+                # self-DoS (every tools/call → "no registered schema"). Skip the
+                # SCHEMA gate only (the size + injection gates above already ran)
+                # until a manifest is registered; never fail closed pre-manifest.
+                log.warning(
+                    "T3 strict_schema: no tools/list manifest observed yet — "
+                    "schema validation skipped for tool %r (injection/size gates "
+                    "still enforced). Route tools/list through this guard before "
+                    "tools/call to enable schema enforcement.",
+                    tool_name,
                 )
-            schema = self._tool_schemas[tool_name]
-            if schema:
-                self._validate_schema(arguments or {}, schema, tool_name)
+            elif tool_name not in self._tool_schemas:
+                # A manifest IS known and this tool is not in it — fail closed.
+                raise ValidationError(
+                    f"Tool {tool_name!r} is not in the observed tools/list "
+                    "manifest — unknown tool rejected (T3-005)"
+                )
+            else:
+                schema = self._tool_schemas[tool_name]
+                if schema:
+                    self._validate_schema(arguments or {}, schema, tool_name)
 
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        # A1 fix: auto-register tool input schemas from the observed tools/list
+        # response — mirroring IntegrityEngine.on_response / SupplyChainEngine.
+        # on_response. Without this, `_tool_schemas` is never populated on any
+        # live adapter path, so with the default strict_schema=True EVERY
+        # tools/call was rejected with "no registered schema" (self-DoS).
+        #
+        # The MCP protocol mandates that a client fetches tools/list (to learn
+        # tool names + inputSchema) before it can issue a tools/call, and the
+        # adapter routes that tools/list response through this hook, so by the
+        # time the first tools/call arrives the schema is registered. Schemas
+        # live on the engine instance (shared across sessions by the guard), so
+        # one observed manifest populates enforcement for all callers.
+        if resp.result is not None and "tools" in resp.result:
+            tools = resp.result.get("tools")
+            if isinstance(tools, list):
+                self.register_tools([t for t in tools if isinstance(t, dict)])
         return ctx
 
     async def on_session_end(self, ctx: CoSAIContext) -> None:

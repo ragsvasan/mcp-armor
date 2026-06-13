@@ -448,7 +448,8 @@ class AuthEngine:
         parts = auth_header.split(None, 1)
         if len(parts) != 2:
             raise AuthenticationError(
-                "Missing or malformed Authorization header — expected 'Bearer <token>' or 'DPoP <token>'"
+                "Missing or malformed Authorization header — "
+                "expected 'Bearer <token>' or 'DPoP <token>'"
             )
         scheme, access_token = parts[0].lower(), parts[1].strip()
 
@@ -493,11 +494,7 @@ class AuthEngine:
         # cnf.jkt thumbprint check only fires when cnf.jkt is present), so a
         # stolen non-bound token could be replayed with any attacker-minted valid
         # proof. Fail closed unless the operator explicitly opts out.
-        if (
-            self._require_cnf_binding
-            and (self._require_dpop or dpop_proof)
-            and not cnf_jkt
-        ):
+        if self._require_cnf_binding and (self._require_dpop or dpop_proof) and not cnf_jkt:
             raise AuthenticationError(
                 "DPoP is in force but the access token is not sender-constrained "
                 "(missing cnf.jkt) — the DPoP proof key cannot be bound to the "

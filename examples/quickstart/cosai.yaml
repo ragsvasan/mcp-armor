@@ -1,0 +1,55 @@
+# =============================================================================
+# mcp-armor — RUNNABLE local-dev quickstart  (B2)
+# =============================================================================
+# Boots out-of-the-box once you set ONE env var:
+#
+#     export ARMOR_SESSION_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+#
+# then:  CoSAIGuard.from_config("examples/quickstart/cosai.yaml")
+#
+# It writes its audit log to ./mcp-armor-audit/audit.jsonl (relative, writable)
+# and accepts unauthenticated requests so you can curl initialize → tools/list →
+# tools/call without standing up an IdP.
+#
+#   *** DEV ONLY — NOT a production posture. ***
+# T1 (auth), T2 (authz) and T11 (supply-chain allowlist) are disabled here so the
+# demo runs without a token, a tool policy, or an allowlist. For production start
+# from ../../cosai.yaml.example, which turns all three on and fails closed.
+# =============================================================================
+
+version: 1
+
+threats:
+  T1:
+    enabled: false        # DEV: no auth. Production: enable + configure jwks/endpoint_uri.
+  T2:
+    enabled: false        # DEV: no authz. Production: enable + define tool_policies.
+  T3:
+    enabled: true         # input validation + schema (auto-registered from tools/list)
+    max_payload_bytes: 65536
+    strict_schema: true
+  T4:
+    enabled: true
+  T5:
+    enabled: true
+    profile: pci
+  T6:
+    enabled: true
+    fail_on_drift: true
+  T7:
+    enabled: true         # transport-bound session continuity (needs ARMOR_SESSION_SECRET)
+  T8:
+    enabled: true
+    block_rfc1918: true
+  T9:
+    enabled: true
+    strip_injection_patterns: true
+  T10:
+    enabled: true
+    max_calls_per_session: 100
+  T11:
+    enabled: false        # DEV: allow any tool. Production: enable + tool_allowlist.
+  T12:
+    enabled: true
+    path: ./mcp-armor-audit/audit.jsonl   # relative + writable
+    require_hmac_key: false               # DEV: unsigned chain OK. Production: true + ARMOR_AUDIT_HMAC_KEY.

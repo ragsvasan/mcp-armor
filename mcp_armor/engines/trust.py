@@ -17,16 +17,24 @@ _CTRL_TABLE = str.maketrans(dict.fromkeys(_CTRL_CHARS, None))
 
 class TrustEngine:
     """
-    Sanitizes LLM-generated output before it is re-fed into tool arguments
-    or injected back into the reasoning loop.
+    Guards the LLM-output trust boundary (T9) two different ways — read which
+    you are using (B1):
+
+    - on_response (the wired middleware path): BLOCK-only. It scans the response
+      for injection patterns and raises TrustBoundaryViolation on a hit; the
+      adapter then replaces the whole response with an opaque error. It does NOT
+      strip the offending substring out of the forwarded response. The
+      `strip_injection_patterns` flag gates whether this blocking scan runs — it
+      does not cause stripping on this path.
+    - sanitize(text) (explicit-call helper): REDACTS. Truncates, removes null /
+      control / dangerous-Unicode characters, raises on injection patterns, and
+      returns HTML-escaped safe text. Call it explicitly wherever LLM output is
+      about to be re-fed as input to another tool.
 
     Covers:
     - T9-001: Unsanitized LLM output used as tool argument (prompt injection vector)
     - T9-002: LLM-generated URLs or shell commands executed without validation
     - T9-003: Overreliance on LLM judgment for security decisions
-
-    This engine wraps the sanitize() method — call it explicitly wherever
-    LLM output is about to be re-used as input to another tool.
     """
 
     def __init__(
@@ -38,6 +46,7 @@ class TrustEngine:
         self._strip_injections = strip_injection_patterns
         if self._strip_injections:
             from .boundary import BoundaryEngine
+
             self._boundary = BoundaryEngine()
 
     def sanitize(self, text: str) -> str:
@@ -55,9 +64,9 @@ class TrustEngine:
         cleaned = []
         for ch in text:
             cp = ord(ch)
-            if 0xD800 <= cp <= 0xDFFF:   # surrogates
+            if 0xD800 <= cp <= 0xDFFF:  # surrogates
                 continue
-            if 0xE000 <= cp <= 0xF8FF:   # private use area
+            if 0xE000 <= cp <= 0xF8FF:  # private use area
                 continue
             cleaned.append(ch)
         text = "".join(cleaned)

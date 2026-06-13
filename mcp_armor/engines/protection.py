@@ -9,7 +9,13 @@ from ..types import MCPRequest, MCPResponse
 
 class ProtectionEngine:
     """
-    Scrubs PII and secrets from outbound tool responses.
+    Blocks outbound tool responses that contain PII or secrets (T5).
+
+    Semantics — BLOCK, not redact (B1). on_response does NOT scrub/mask matched
+    values out of the response; it raises PIILeakError and the adapter replaces
+    the entire response with an opaque error. This is fail-closed (a leak is
+    refused outright rather than partially masked and forwarded). There is no
+    in-place redaction path — the response is all-or-nothing.
 
     Covers:
     - T5-001: SSN, credit card, email, phone in response
@@ -21,10 +27,10 @@ class ProtectionEngine:
 
     _PROFILES: dict[str, list[str]] = {
         "minimal": ["jwt", "api_key"],
-        "pci":     ["ssn", "credit_card", "jwt", "api_key"],
-        "hipaa":   ["ssn", "credit_card", "email", "phone", "jwt", "api_key"],
-        "gdpr":    ["ssn", "credit_card", "email", "phone", "jwt", "api_key"],
-        "strict":  ["ssn", "credit_card", "email", "phone", "jwt", "api_key"],
+        "pci": ["ssn", "credit_card", "jwt", "api_key"],
+        "hipaa": ["ssn", "credit_card", "email", "phone", "jwt", "api_key"],
+        "gdpr": ["ssn", "credit_card", "email", "phone", "jwt", "api_key"],
+        "strict": ["ssn", "credit_card", "email", "phone", "jwt", "api_key"],
     }
 
     def __init__(self, profile: str = "pci") -> None:
@@ -38,12 +44,12 @@ class ProtectionEngine:
             import re  # type: ignore[no-redef]
 
         all_patterns = {
-            "ssn":         r"\b\d{3}-\d{2}-\d{4}\b",
+            "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
             "credit_card": r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b",
-            "email":       r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
-            "phone":       r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
-            "jwt":         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-            "api_key":     r"(?i)(?:api[_-]?key|token|secret)[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_\-]{16,}",
+            "email": r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b",
+            "phone": r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+            "jwt": r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            "api_key": r"(?i)(?:api[_-]?key|token|secret)[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_\-]{16,}",
         }
         return {k: re.compile(v) for k, v in all_patterns.items() if k in self._active}
 
@@ -64,9 +70,7 @@ class ProtectionEngine:
             return ctx
         for pii_type, pattern in self._patterns.items():
             if pattern.search(resp.scan_body):
-                raise PIILeakError(
-                    f"PII type '{pii_type}' detected in tool response — blocked"
-                )
+                raise PIILeakError(f"PII type '{pii_type}' detected in tool response — blocked")
         return ctx
 
     async def on_session_end(self, ctx: CoSAIContext) -> None:

@@ -10,3 +10,9 @@ build/
 .env
 .venv/
 venv/
+.coverage
+.testmondata
+# local audit logs written by examples/quickstart
+mcp-armor-audit/
+*.jsonl.hwm
+*.jsonl.hmac_enabled

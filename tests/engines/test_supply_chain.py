@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+
 import pytest
 
 from mcp_armor.engines.supply_chain import SupplyChainEngine
@@ -27,6 +28,7 @@ def _engine(
 # ---------------------------------------------------------------------------
 # T11-001: Allowlist enforcement
 # ---------------------------------------------------------------------------
+
 
 def test_allowlisted_tool_passes() -> None:
     eng = _engine(allowlist=["tool_a", "tool_b"])
@@ -57,6 +59,7 @@ def test_empty_allowlist_denies_all() -> None:
 # T11-002: Typosquatting (Levenshtein)
 # ---------------------------------------------------------------------------
 
+
 def test_typosquat_within_threshold_denied() -> None:
     eng = _engine(allowlist=["tools_list"], threshold=1)
     # "toolslist" = 1 deletion from "tools_list"
@@ -83,6 +86,7 @@ def test_exact_allowlist_match_with_threshold() -> None:
 # ---------------------------------------------------------------------------
 # T11-ADV-001: NFKC homoglyph attack
 # ---------------------------------------------------------------------------
+
 
 def test_nfkc_lookalike_allowlist_match_passes() -> None:
     """Fullwidth variant NFKC-normalizes to the allowlisted name — should pass."""
@@ -111,6 +115,7 @@ def test_nfkc_typosquat_within_threshold_denied() -> None:
 # T11-003: Ed25519 registry signature
 # ---------------------------------------------------------------------------
 
+
 def test_signature_required_but_missing_denied() -> None:
     eng = _engine(allowlist=["my_tool"], require_sig=True)
     # We're not setting a pub_key here; on_startup would fail, but validate_tools
@@ -126,11 +131,13 @@ def test_signature_not_required_skipped() -> None:
 
 def test_ed25519_signature_roundtrip() -> None:
     """Generate a real Ed25519 key pair, sign a tool definition, verify it passes."""
+    import binascii
+
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives.serialization import (
-        Encoding, PublicFormat, NoEncryption, PrivateFormat
+        Encoding,
+        PublicFormat,
     )
-    import binascii
 
     # Generate key pair
     priv = Ed25519PrivateKey.generate()
@@ -153,14 +160,15 @@ def test_ed25519_signature_roundtrip() -> None:
 
 
 def test_ed25519_wrong_signature_denied() -> None:
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
     import binascii
 
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
     priv = Ed25519PrivateKey.generate()
-    pub_pem = priv.public_key().public_bytes(
-        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
-    ).decode()
+    pub_pem = (
+        priv.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    )
 
     tool = {"name": "my_tool"}
     bad_sig = binascii.hexlify(b"\x00" * 64).decode()
@@ -177,6 +185,7 @@ def test_ed25519_wrong_signature_denied() -> None:
 # ---------------------------------------------------------------------------
 # Lifecycle hooks (pass-throughs)
 # ---------------------------------------------------------------------------
+
 
 async def test_on_request_passthrough() -> None:
     eng = _engine()
@@ -201,6 +210,7 @@ async def test_on_startup_sig_required_without_key_raises() -> None:
 # ---------------------------------------------------------------------------
 # Panel regression tests
 # ---------------------------------------------------------------------------
+
 
 def test_regression_missing_name_key_raises() -> None:
     """FIX-2: entry without 'name' key must raise SupplyChainError, not TypeError."""
@@ -229,9 +239,9 @@ def test_regression_bad_hex_sig_raises_supply_chain_error() -> None:
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
     priv = Ed25519PrivateKey.generate()
-    pub_pem = priv.public_key().public_bytes(
-        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
-    ).decode()
+    pub_pem = (
+        priv.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
+    )
     eng = SupplyChainEngine(
         tool_allowlist=["my_tool"],
         require_registry_signature=True,
@@ -244,6 +254,7 @@ def test_regression_bad_hex_sig_raises_supply_chain_error() -> None:
 # ---------------------------------------------------------------------------
 # T11-001: on_request allowlist enforcement (regression — was a no-op)
 # ---------------------------------------------------------------------------
+
 
 async def test_on_request_blocks_unlisted_tool_call() -> None:
     """on_request must reject tools/call for names not on the allowlist (T11-001).
@@ -310,11 +321,14 @@ async def test_on_request_non_tools_call_not_checked() -> None:
 # Codex P1: on_response intercepts tools/list for automatic manifest validation
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_regression_on_response_blocks_unlisted_tool_in_manifest() -> None:
     """P1: on_response must validate tools/list response and reject unlisted tools."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine(allowlist=["allowed_tool"])
     ctx = make_ctx()
     resp = MCPResponse(
@@ -329,8 +343,10 @@ async def test_regression_on_response_blocks_unlisted_tool_in_manifest() -> None
 @pytest.mark.asyncio
 async def test_regression_on_response_passes_allowlisted_manifest() -> None:
     """P1: on_response must pass tools/list with only allowlisted tools."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine(allowlist=["fetch_data", "list_files"])
     ctx = make_ctx()
     resp = MCPResponse(
@@ -345,8 +361,10 @@ async def test_regression_on_response_passes_allowlisted_manifest() -> None:
 @pytest.mark.asyncio
 async def test_regression_on_response_no_allowlist_passes_any_manifest() -> None:
     """P1: on_response with no allowlist configured must accept any tools/list."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine(allowlist=None)
     ctx = make_ctx()
     resp = MCPResponse(
@@ -361,8 +379,10 @@ async def test_regression_on_response_no_allowlist_passes_any_manifest() -> None
 @pytest.mark.asyncio
 async def test_regression_on_response_non_tools_list_not_validated() -> None:
     """P1: on_response must not validate responses that have no 'tools' key."""
-    from mcp_armor.types import MCPResponse
     from types import MappingProxyType
+
+    from mcp_armor.types import MCPResponse
+
     eng = _engine(allowlist=["fetch_data"])
     ctx = make_ctx()
     # A tools/call result has no 'tools' key

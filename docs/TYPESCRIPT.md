@@ -1,11 +1,27 @@
 # Using mcp-armor with TypeScript (and other non-Python) MCP servers
 
+> ## ⚠️ This is a DIY recipe, not a shipped artifact
+>
+> Everything below is a **copy-paste reference pattern you build and run
+> yourself**. To be explicit about what mcp-armor does *not* ship:
+>
+> - **There is no `mcp_armor.sidecar` module.** You write the proxy process
+>   yourself from the snippet below.
+> - **There is no published Docker image.** The Compose example builds from your
+>   own files.
+> - **stdio TypeScript servers are uncovered.** The pattern only intercepts HTTP
+>   transport (see the stdio note below).
+> - **The loopback hop is unbenchmarked.** Latency numbers are not measured.
+>
+> The proxy snippet is correct and usable — just treat it as a do-it-yourself
+> reference, not a product feature.
+
 mcp-armor is a Python library. It cannot be `npm install`-ed into a TypeScript
 project. This guide covers the two paths available to TypeScript MCP server authors.
 
 ---
 
-## Option 1 — Sidecar proxy (available today)
+## Option 1 — Sidecar proxy (do-it-yourself reference)
 
 Run mcp-armor as a thin Python process in front of your existing server.
 `ArmorMiddleware` enforces all 12 CoSAI controls on every JSON-RPC request and
@@ -121,8 +137,9 @@ Every CoSAI control runs at the sidecar layer:
 
 ### Limitations of the proxy approach
 
-- **Extra network hop**: one additional loopback HTTP call per request. In
-  practice this is sub-millisecond on the same host or in the same pod.
+- **Extra network hop**: one additional loopback HTTP call per request. This
+  overhead is **unbenchmarked** — measure it for your own workload before
+  relying on any latency assumption.
 - **Separate process to deploy**: you manage two processes (or containers)
   instead of one.
 - **stdio transport**: the proxy only covers HTTP transport. If your TypeScript

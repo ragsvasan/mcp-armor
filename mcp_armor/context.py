@@ -14,15 +14,15 @@ class CoSAIContext:
     session_id: str
     user_id: str | None
     tenant_id: str | None
-    scopes: tuple[str, ...]        # T2: OAuth scopes extracted by AuthEngine from JWT
-    tool_manifest_hash: str        # T6: SHA-256 of tools/list response at initialize
-    budget: BudgetState            # T10: call + time tracking
-    audit_parent_id: str | None    # T12: DAG parent for nested calls
+    scopes: tuple[str, ...]  # T2: OAuth scopes extracted by AuthEngine from JWT
+    tool_manifest_hash: str  # T6: SHA-256 of tools/list response at initialize
+    budget: BudgetState  # T10: call + time tracking
+    audit_parent_id: str | None  # T12: DAG parent for nested calls
     findings: tuple[Finding, ...]  # accumulated across all engines this request
-    transport: str                 # T7: transport type — set by adapter at session open
+    transport: str  # T7: transport type — set by adapter at session open
 
     @classmethod
-    def new(cls, session_id: str, transport: str = "http") -> "CoSAIContext":
+    def new(cls, session_id: str, transport: str = "http") -> CoSAIContext:
         return cls(
             session_id=session_id,
             user_id=None,
@@ -35,22 +35,22 @@ class CoSAIContext:
             transport=transport,
         )
 
-    def with_finding(self, finding: Finding) -> "CoSAIContext":
+    def with_finding(self, finding: Finding) -> CoSAIContext:
         return replace(self, findings=(*self.findings, finding))
 
-    def with_user(self, user_id: str, tenant_id: str | None = None) -> "CoSAIContext":
+    def with_user(self, user_id: str, tenant_id: str | None = None) -> CoSAIContext:
         return replace(self, user_id=user_id, tenant_id=tenant_id)
 
-    def with_scopes(self, scopes: tuple[str, ...]) -> "CoSAIContext":
+    def with_scopes(self, scopes: tuple[str, ...]) -> CoSAIContext:
         return replace(self, scopes=scopes)
 
-    def with_manifest_hash(self, h: str) -> "CoSAIContext":
+    def with_manifest_hash(self, h: str) -> CoSAIContext:
         return replace(self, tool_manifest_hash=h)
 
-    def with_budget(self, budget: BudgetState) -> "CoSAIContext":
+    def with_budget(self, budget: BudgetState) -> CoSAIContext:
         return replace(self, budget=budget)
 
-    def with_audit_parent(self, parent_id: str) -> "CoSAIContext":
+    def with_audit_parent(self, parent_id: str) -> CoSAIContext:
         return replace(self, audit_parent_id=parent_id)
 
 

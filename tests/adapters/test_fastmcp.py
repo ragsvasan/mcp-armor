@@ -6,22 +6,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mcp_armor.adapters.fastmcp import wrap_fastmcp, _GuardedToolDispatcher
-from mcp_armor.guard import CoSAIGuard
+from mcp_armor.adapters.fastmcp import _GuardedToolDispatcher, wrap_fastmcp
 from mcp_armor.engines.session import SessionEngine
 from mcp_armor.exceptions import AuthorizationError
+from mcp_armor.guard import CoSAIGuard
 
 
 def _guard() -> CoSAIGuard:
-    return CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    return CoSAIGuard([SessionEngine()])
 
 
 # ---------------------------------------------------------------------------
 # Helpers — fake FastMCP module and instances
 # ---------------------------------------------------------------------------
 
+
 def _fake_fastmcp_module():
     """Build a fake fastmcp module whose FastMCP class supports isinstance()."""
+
     class FakeFastMCP:
         pass
 
@@ -33,6 +35,7 @@ def _fake_fastmcp_module():
 # ---------------------------------------------------------------------------
 # wrap_fastmcp — ASGI composition
 # ---------------------------------------------------------------------------
+
 
 def test_wrap_fastmcp_missing_import_raises() -> None:
     """Without fastmcp installed the adapter must raise ImportError immediately."""
@@ -86,6 +89,7 @@ def test_wrap_fastmcp_unknown_app_type_raises() -> None:
 # _GuardedToolDispatcher
 # ---------------------------------------------------------------------------
 
+
 async def test_guarded_tool_calls_fn_when_guard_passes() -> None:
     """When guard chain passes, the original tool function is called."""
     dispatcher = _GuardedToolDispatcher(CoSAIGuard([]))  # no engines
@@ -106,12 +110,23 @@ async def test_guarded_tool_raises_when_guard_rejects() -> None:
     """When an engine raises CoSAIException, the wrapped tool must raise it too."""
 
     class RejectAllEngine:
-        async def on_startup(self) -> None: pass
-        async def on_session_start(self, ctx): return ctx
-        async def on_request(self, ctx, req): raise AuthorizationError("always rejected")
-        async def on_response(self, ctx, resp): return ctx
-        async def on_session_end(self, ctx) -> None: pass
-        async def on_shutdown(self) -> None: pass
+        async def on_startup(self) -> None:
+            pass
+
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            raise AuthorizationError("always rejected")
+
+        async def on_response(self, ctx, resp):
+            return ctx
+
+        async def on_session_end(self, ctx) -> None:
+            pass
+
+        async def on_shutdown(self) -> None:
+            pass
 
     dispatcher = _GuardedToolDispatcher(CoSAIGuard([RejectAllEngine()]))
 
@@ -131,7 +146,7 @@ async def test_guarded_tool_closes_session_on_success() -> None:
         async def on_session_end(self, ctx) -> None:
             closed.append(ctx.session_id)
 
-    dispatcher = _GuardedToolDispatcher(CoSAIGuard([TrackCloseEngine(bind_to_dpop=False)]))
+    dispatcher = _GuardedToolDispatcher(CoSAIGuard([TrackCloseEngine()]))
 
     async def my_tool() -> str:
         return "ok"
@@ -148,20 +163,29 @@ async def test_guarded_tool_closes_session_on_response_error() -> None:
     from mcp_armor.exceptions import InjectionDetectedError
 
     class RejectResponseEngine:
-        async def on_startup(self) -> None: pass
-        async def on_session_start(self, ctx): return ctx
-        async def on_request(self, ctx, req): return ctx
-        async def on_response(self, ctx, resp): raise InjectionDetectedError("bad response")
-        async def on_session_end(self, ctx) -> None: pass
-        async def on_shutdown(self) -> None: pass
+        async def on_startup(self) -> None:
+            pass
+
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            return ctx
+
+        async def on_response(self, ctx, resp):
+            raise InjectionDetectedError("bad response")
+
+        async def on_session_end(self, ctx) -> None:
+            pass
+
+        async def on_shutdown(self) -> None:
+            pass
 
     class TrackCloseEngine(SessionEngine):
         async def on_session_end(self, ctx) -> None:
             closed.append(ctx.session_id)
 
-    dispatcher = _GuardedToolDispatcher(
-        CoSAIGuard([RejectResponseEngine(), TrackCloseEngine(bind_to_dpop=False)])
-    )
+    dispatcher = _GuardedToolDispatcher(CoSAIGuard([RejectResponseEngine(), TrackCloseEngine()]))
 
     async def my_tool() -> str:
         return "jailbreak content"
@@ -176,25 +200,35 @@ async def test_guarded_tool_closes_session_on_response_error() -> None:
 # Panel regression tests
 # ---------------------------------------------------------------------------
 
+
 async def test_regression_close_session_fires_when_run_request_raises() -> None:
     """FIX-1: close_session must fire even when _run_request raises (before fn executes)."""
     closed: list[str] = []
 
     class RejectRequestEngine:
-        async def on_startup(self) -> None: pass
-        async def on_session_start(self, ctx): return ctx
-        async def on_request(self, ctx, req): raise AuthorizationError("rejected at request")
-        async def on_response(self, ctx, resp): return ctx
-        async def on_session_end(self, ctx) -> None: pass
-        async def on_shutdown(self) -> None: pass
+        async def on_startup(self) -> None:
+            pass
+
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            raise AuthorizationError("rejected at request")
+
+        async def on_response(self, ctx, resp):
+            return ctx
+
+        async def on_session_end(self, ctx) -> None:
+            pass
+
+        async def on_shutdown(self) -> None:
+            pass
 
     class TrackCloseEngine(SessionEngine):
         async def on_session_end(self, ctx) -> None:
             closed.append(ctx.session_id)
 
-    dispatcher = _GuardedToolDispatcher(
-        CoSAIGuard([RejectRequestEngine(), TrackCloseEngine(bind_to_dpop=False)])
-    )
+    dispatcher = _GuardedToolDispatcher(CoSAIGuard([RejectRequestEngine(), TrackCloseEngine()]))
 
     async def my_tool() -> str:
         return "unreachable"
@@ -210,16 +244,25 @@ async def test_regression_hook_transport_propagated_to_context() -> None:
     observed: list[str] = []
 
     class TransportSpyEngine:
-        async def on_startup(self) -> None: pass
+        async def on_startup(self) -> None:
+            pass
+
         async def on_session_start(self, ctx):
             observed.append(f"session:{ctx.transport}")
             return ctx
+
         async def on_request(self, ctx, req):
             observed.append(f"req:{req.transport}")
             return ctx
-        async def on_response(self, ctx, resp): return ctx
-        async def on_session_end(self, ctx) -> None: pass
-        async def on_shutdown(self) -> None: pass
+
+        async def on_response(self, ctx, resp):
+            return ctx
+
+        async def on_session_end(self, ctx) -> None:
+            pass
+
+        async def on_shutdown(self) -> None:
+            pass
 
     dispatcher = _GuardedToolDispatcher(CoSAIGuard([TransportSpyEngine()]))
 
@@ -237,7 +280,8 @@ def test_regression_wrap_fastmcp_rejects_non_fastmcp_type() -> None:
     fake_module, FakeFastMCP = _fake_fastmcp_module()
 
     class ImposterApp:
-        def http_app(self): return MagicMock()
+        def http_app(self):
+            return MagicMock()
 
     with patch.dict("sys.modules", {"fastmcp": fake_module}):
         with pytest.raises(TypeError, match="FastMCP instance"):
@@ -249,14 +293,24 @@ async def test_regression_guarded_tool_raw_body_is_html_escaped() -> None:
     received_bodies: list[str] = []
 
     class BodySpyEngine:
-        async def on_startup(self) -> None: pass
-        async def on_session_start(self, ctx): return ctx
-        async def on_request(self, ctx, req): return ctx
+        async def on_startup(self) -> None:
+            pass
+
+        async def on_session_start(self, ctx):
+            return ctx
+
+        async def on_request(self, ctx, req):
+            return ctx
+
         async def on_response(self, ctx, resp):
             received_bodies.append(resp.raw_body)
             return ctx
-        async def on_session_end(self, ctx) -> None: pass
-        async def on_shutdown(self) -> None: pass
+
+        async def on_session_end(self, ctx) -> None:
+            pass
+
+        async def on_shutdown(self) -> None:
+            pass
 
     dispatcher = _GuardedToolDispatcher(CoSAIGuard([BodySpyEngine()]))
 
@@ -270,3 +324,28 @@ async def test_regression_guarded_tool_raw_body_is_html_escaped() -> None:
     # Must be HTML-escaped — raw "<script>" must not appear
     assert "<script>" not in received_bodies[0]
     assert "&lt;script&gt;" in received_bodies[0]
+
+
+# ---------------------------------------------------------------------------
+# A1 panel-hardening regression (Defense FIX2): strict_schema must NOT self-DoS
+# on the _GuardedToolDispatcher path, which never routes a tools/list response
+# through ValidationEngine.on_response (MCPResponse.from_text → result=None).
+# ---------------------------------------------------------------------------
+
+
+async def test_regression_a1_guarded_tool_dispatcher_strict_schema_no_self_dos() -> None:
+    """A decorated tool on a guard with ValidationEngine(strict_schema=True) must
+    execute — not raise 'no registered schema' — even though no tools/list ever
+    traversed this adapter."""
+    from mcp_armor.engines.validation import ValidationEngine
+
+    dispatcher = _GuardedToolDispatcher(
+        CoSAIGuard([SessionEngine(), ValidationEngine(strict_schema=True)])
+    )
+
+    async def echo(message: str = "") -> str:
+        return f"Echo: {message}"
+
+    wrapped = dispatcher.hook(echo)
+    result = await wrapped(message="hello")
+    assert result == "Echo: hello"

@@ -63,8 +63,7 @@ class SessionSigner:
     def __init__(self, secret: bytes) -> None:
         if len(secret) < _MIN_SECRET_BYTES:
             raise ValueError(
-                f"session secret too short: need >= {_MIN_SECRET_BYTES} bytes, "
-                f"got {len(secret)}"
+                f"session secret too short: need >= {_MIN_SECRET_BYTES} bytes, got {len(secret)}"
             )
         self._secret = secret
 
@@ -100,14 +99,12 @@ class SessionSigner:
         """Raise SessionError unless `token` is a valid signature for `transport`."""
         if not token or len(token) > _MAX_TOKEN_LEN or token.count(".") != 1:
             raise SessionError(
-                "Malformed session token — not server-issued "
-                "(possible session fixation, T7-001)"
+                "Malformed session token — not server-issued (possible session fixation, T7-001)"
             )
         nonce_b64, sig = token.split(".")
         if not nonce_b64 or not sig:
             raise SessionError(
-                "Malformed session token — not server-issued "
-                "(possible session fixation, T7-001)"
+                "Malformed session token — not server-issued (possible session fixation, T7-001)"
             )
         expected = self._sig(nonce_b64, transport)
         if not hmac.compare_digest(sig, expected):

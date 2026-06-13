@@ -77,7 +77,7 @@ protected = wrap_dispatcher(my_dispatcher, guard)
 response = await protected({"method": "tools/call", "params": {...}})
 ```
 
-See [cosai.yaml.example](cosai.yaml.example) for the full configuration reference and [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for a step-by-step guide.
+For a runnable quickstart, [examples/quickstart/cosai.yaml](examples/quickstart/cosai.yaml) boots with just `ARMOR_SESSION_SECRET` set. See [cosai.yaml.example](cosai.yaml.example) for the production configuration reference (documents the env vars it requires) and [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for a step-by-step guide.
 
 ## Using mcp-armor with TypeScript / non-Python servers
 
@@ -104,10 +104,11 @@ CrowdStrike's *"90-Day Roadmap for Securing Agentic AI"* whitepaper correctly id
 mcp-armor *is* that in-call-path implementation, as OSS:
 
 - **In-process, not a sidecar SOC.** mcp-armor runs inside the MCP server and sees tool responses and LLM re-feed before they leave the process. No external agent, no vendor trust anchor.
-- **HMAC-signed tamper-evident audit (T12).** Not fire-and-forget logging — an HMAC-SHA256 chain (when `ARMOR_AUDIT_HMAC_KEY` is set) with DAG parent tracking and a sticky marker file that prevents silent downgrade. Detects both field tampering and log truncation. Forensics-ready without a separate SIEM contract.
-- **Signed supply chain shipped, not aspirational (T6/T11).** Their roadmap *recommends* signed manifests; mcp-armor enforces Ed25519 registry signatures and blocks unsigned/typosquatted tools by default.
+- **HMAC-signed tamper-evident audit (T12).** Not fire-and-forget logging — an HMAC-SHA256 chain with DAG parent tracking and a sticky marker file that prevents silent downgrade. HMAC signing is required by default: `ARMOR_AUDIT_HMAC_KEY` must be set at startup when T12 is enabled (`T12.require_hmac_key` defaults true; opt out for dev with `require_hmac_key: false` or `ARMOR_AUDIT_ALLOW_UNSIGNED=1`). Detects both field tampering and log truncation. Forensics-ready without a separate SIEM contract.
+- **Supply-chain gating shipped, not aspirational (T6/T11).** Their roadmap *recommends* signed manifests; mcp-armor blocks typosquatted and non-allowlisted tools by default, and verifies Ed25519 registry signatures as an opt-in control (`require_registry_signature`, default false).
 - **RE2-only, fail-closed.** Linear-time regex (no catastrophic backtracking DoS), frozen-dataclass immutability eliminating async context bleed — production-grade details closed platforms don't expose or guarantee.
-- **`dry_run` mode for safe config tuning (NOT FOR PRODUCTION).** `CoSAIGuard(dry_run=True)` logs violations at WARNING and audits them without blocking, so you can tune policy thresholds before enabling enforcement. Auth errors always re-raise even in dry_run.
+- **Hot-path ready, with numbers.** The CPU scanning chain runs at p50 ≈ 115 µs / p99 ≈ 158 µs; the full chain including T12 audit disk I/O at p50 ≈ 608 µs / p99 ≈ 810 µs (Apple M5, 20k iterations). Reproduce with `benchmarks/chain_overhead.py`.
+- **`dry_run` mode for safe config tuning (NOT FOR PRODUCTION).** `CoSAIGuard(dry_run=True)` logs violations at WARNING and audits them without blocking, so you can tune policy thresholds before enabling enforcement. To guard against accidental production use, it refuses to construct unless `ARMOR_ALLOW_DRY_RUN=1` is set. Auth errors always re-raise even in dry_run.
 
 Roadmap (closing the remaining CrowdStrike workstreams as OSS controls): SIEM/SOAR emitter + anomaly thresholds (WS4), non-bypassable out-of-band human approval so an agent cannot resubmit its own confirmation token (WS7), and an incident-response containment orchestrator — pause tool / quarantine server / freeze session / revoke creds wired to engine exceptions (WS8). See [docs/VISION.md](docs/VISION.md#positioning-vs-commercial-platforms) for the full mapping.
 

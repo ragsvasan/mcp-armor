@@ -8,7 +8,7 @@ import unicodedata
 
 from ..context import CoSAIContext
 from ..exceptions import IntegrityError
-from ..types import MCPRequest, MCPResponse, Finding, Severity, ThreatCategory
+from ..types import Finding, MCPRequest, MCPResponse, Severity, ThreatCategory
 
 
 def _nfkc(name: str) -> str:
@@ -39,9 +39,7 @@ class IntegrityEngine:
         typosquat_distance: int = 2,
     ) -> None:
         self._fail_on_drift = fail_on_drift
-        self._allowlist = (
-            {_nfkc(n) for n in tool_allowlist} if tool_allowlist is not None else None
-        )
+        self._allowlist = {_nfkc(n) for n in tool_allowlist} if tool_allowlist is not None else None
         self._typosquat_distance = typosquat_distance
 
     @staticmethod

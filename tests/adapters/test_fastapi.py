@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import json
 
-import pytest
 import httpx
+import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mcp_armor.adapters.fastapi import ArmorMiddleware
-from mcp_armor.guard import CoSAIGuard
 from mcp_armor.engines.session import SessionEngine
-
+from mcp_armor.guard import CoSAIGuard
 
 # ---------------------------------------------------------------------------
 # Test app + client fixtures
 # ---------------------------------------------------------------------------
+
 
 async def _echo_handler(request: Request) -> JSONResponse:
     """Simple MCP-like echo handler: returns the method from the JSON body."""
@@ -27,12 +27,14 @@ async def _echo_handler(request: Request) -> JSONResponse:
         payload = json.loads(body)
     except json.JSONDecodeError:
         payload = {}
-    return JSONResponse({"jsonrpc": "2.0", "id": payload.get("id"), "result": {"method": payload.get("method")}})
+    return JSONResponse(
+        {"jsonrpc": "2.0", "id": payload.get("id"), "result": {"method": payload.get("method")}}
+    )
 
 
 def _make_app(guard: CoSAIGuard | None = None) -> ArmorMiddleware:
     inner = Starlette(routes=[Route("/{path:path}", _echo_handler, methods=["POST"])])
-    g = guard or CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    g = guard or CoSAIGuard([SessionEngine()])
     return ArmorMiddleware(inner, g)
 
 
@@ -50,6 +52,7 @@ def _payload(method: str, params: dict | None = None, req_id: int = 1) -> dict:
 # ---------------------------------------------------------------------------
 # Session lifecycle — initialize generates session_id (T7-001)
 # ---------------------------------------------------------------------------
+
 
 async def test_initialize_returns_session_header() -> None:
     async with _client(_make_app()) as client:
@@ -108,6 +111,7 @@ async def test_unknown_session_id_rejected() -> None:
 # Session fixation — initialize must also be verified by SessionEngine
 # ---------------------------------------------------------------------------
 
+
 async def test_reinitialize_on_wrong_transport_rejected() -> None:
     """Second initialize on a known session with different transport must fail."""
     app = _make_app()
@@ -131,6 +135,7 @@ async def test_reinitialize_on_wrong_transport_rejected() -> None:
 # ---------------------------------------------------------------------------
 # Error handling — JSON-RPC error bodies
 # ---------------------------------------------------------------------------
+
 
 async def test_malformed_json_returns_parse_error() -> None:
     async with _client(_make_app()) as client:
@@ -162,6 +167,7 @@ async def test_cosai_exception_returns_jsonrpc_error_not_500() -> None:
 # URL session_id leak prevention (T7-002)
 # ---------------------------------------------------------------------------
 
+
 async def test_session_id_in_url_query_rejected() -> None:
     async with _client(_make_app()) as client:
         init_resp = await client.post("/", json=_payload("initialize"))
@@ -181,6 +187,7 @@ async def test_session_id_in_url_query_rejected() -> None:
 # Lifespan — startup/shutdown hooks
 # ---------------------------------------------------------------------------
 
+
 async def test_lifespan_startup_calls_guard_startup() -> None:
     """Lifespan startup event must call guard.startup()."""
     started = []
@@ -189,7 +196,7 @@ async def test_lifespan_startup_calls_guard_startup() -> None:
         async def on_startup(self) -> None:
             started.append(True)
 
-    guard = CoSAIGuard([TrackingEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([TrackingEngine()])
     inner = Starlette(routes=[Route("/", _echo_handler, methods=["POST"])])
     app = ArmorMiddleware(inner, guard)
 
@@ -218,6 +225,7 @@ async def test_lifespan_startup_calls_guard_startup() -> None:
 # Dispatcher adapter — session fixation prevention
 # ---------------------------------------------------------------------------
 
+
 async def test_dispatcher_adapter_never_uses_payload_id_as_session() -> None:
     """
     The dispatcher adapter must generate session_id via CSPRNG, never from payload['id'].
@@ -229,6 +237,7 @@ async def test_dispatcher_adapter_never_uses_payload_id_as_session() -> None:
 
     async def fake_dispatcher(payload: dict) -> dict:
         from mcp_armor.context import get_context
+
         ctx = get_context()
         recorded_sessions.append(ctx.session_id)
         return {"jsonrpc": "2.0", "id": payload.get("id"), "result": {}}
@@ -243,12 +252,14 @@ async def test_dispatcher_adapter_never_uses_payload_id_as_session() -> None:
     assert recorded_sessions[0] != attacker_id
     # Session ID must be a UUID (CSPRNG, 128-bit)
     import uuid as _uuid
+
     _uuid.UUID(recorded_sessions[0])  # raises ValueError if not a valid UUID
 
 
 # ---------------------------------------------------------------------------
 # Panel regression tests
 # ---------------------------------------------------------------------------
+
 
 async def test_regression_close_session_called_on_shutdown() -> None:
     """FIX-1: close_session must be called for tracked sessions on lifespan.shutdown."""
@@ -258,7 +269,7 @@ async def test_regression_close_session_called_on_shutdown() -> None:
         async def on_session_end(self, ctx) -> None:
             ended.append(ctx.session_id)
 
-    guard = CoSAIGuard([TrackingEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([TrackingEngine()])
     app = _make_app(guard)
 
     # Open a session
@@ -356,7 +367,7 @@ async def test_regression_wrong_content_type_rejected() -> None:
 async def test_regression_oversized_body_rejected_before_buffering() -> None:
     """FIX-4: body exceeding max_body_bytes must be rejected during receive loop."""
     inner = Starlette(routes=[Route("/{path:path}", _echo_handler, methods=["POST"])])
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([SessionEngine()])
     app = ArmorMiddleware(inner, guard, max_body_bytes=16)  # tiny cap
 
     async with httpx.AsyncClient(
@@ -390,7 +401,6 @@ async def test_regression_session_error_message_is_opaque() -> None:
 async def test_regression_unexpected_engine_exception_returns_json_rpc_error() -> None:
     """FIX-6: non-CoSAIException from engine must return -32603, not HTTP 500."""
     from mcp_armor.engines.base import ProtectionEngine
-    from mcp_armor.types import MCPRequest, MCPResponse
 
     class BrokenEngine(ProtectionEngine):
         async def on_session_start(self, ctx):
@@ -433,8 +443,10 @@ async def test_regression_upstream_session_header_stripped() -> None:
         resp.headers["mcp-session-id"] = "upstream-generated-session-jwt-abc123"
         return resp
 
-    inner = Starlette(routes=[Route("/{path:path}", upstream_with_session_header, methods=["POST"])])
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    inner = Starlette(
+        routes=[Route("/{path:path}", upstream_with_session_header, methods=["POST"])]
+    )
+    guard = CoSAIGuard([SessionEngine()])
     app = ArmorMiddleware(inner, guard)
 
     async with _client(app) as client:
@@ -447,16 +459,14 @@ async def test_regression_upstream_session_header_stripped() -> None:
     # Must be an armor-issued stateless token that armor's own SessionEngine
     # verifies for the http transport — this is what survives multi-instance
     # (a per-process UUID store was the original -32006 cause).
-    session_engine = next(
-        e for e in guard._engines if isinstance(e, SessionEngine)
-    )
+    session_engine = next(e for e in guard._engines if isinstance(e, SessionEngine))
     session_engine.signer.verify(session_ids[0], "http")
 
 
 async def test_regression_websocket_scope_not_forwarded_unguarded() -> None:
     """FIX-7: WebSocket scope must not silently bypass the guard."""
     inner = Starlette(routes=[Route("/", _echo_handler, methods=["POST"])])
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([SessionEngine()])
     app = ArmorMiddleware(inner, guard)
 
     ws_scope = {"type": "websocket", "path": "/", "headers": []}
@@ -477,6 +487,7 @@ async def test_regression_websocket_scope_not_forwarded_unguarded() -> None:
 # ---------------------------------------------------------------------------
 # Codex findings — P0/P2 regression tests
 # ---------------------------------------------------------------------------
+
 
 async def test_regression_response_violation_blocked_before_delivery() -> None:
     """P0: response engine violation must replace the response with an opaque error —
@@ -501,7 +512,7 @@ async def test_regression_response_violation_blocked_before_delivery() -> None:
                 raise PIILeakError("credit card in response")
             return ctx
 
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), ResponseRejectOnToolsCall()])
+    guard = CoSAIGuard([SessionEngine(), ResponseRejectOnToolsCall()])
     app = _make_app(guard)
 
     async with _client(app) as client:
@@ -551,7 +562,7 @@ async def test_regression_response_violation_body_not_in_reply() -> None:
             return ctx
 
     inner = Starlette(routes=[Route("/{path:path}", _leaking_handler, methods=["POST"])])
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), RejectOnSecretData()])
+    guard = CoSAIGuard([SessionEngine(), RejectOnSecretData()])
     app = ArmorMiddleware(inner, guard)
 
     async with _client(app) as client:
@@ -607,7 +618,7 @@ async def test_regression_opaque_codes_injection_is_minus32003() -> None:
         async def on_response(self, ctx, resp):
             return ctx
 
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), InjectOnRequest()])
+    guard = CoSAIGuard([SessionEngine(), InjectOnRequest()])
     app = _make_app(guard)
 
     async with _client(app) as client:
@@ -641,7 +652,7 @@ async def test_regression_opaque_codes_pii_is_minus32004() -> None:
                 raise PIILeakError("ssn found")
             return ctx
 
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), PIIOnResponse()])
+    guard = CoSAIGuard([SessionEngine(), PIIOnResponse()])
     app = _make_app(guard)
 
     async with _client(app) as client:
@@ -661,6 +672,7 @@ async def test_regression_opaque_codes_pii_is_minus32004() -> None:
 async def test_regression_opaque_codes_validation_is_minus32602() -> None:
     """P2: ValidationError (T3, code -32602) must be in the opaque map."""
     from mcp_armor.adapters.fastapi import _OPAQUE_MESSAGES
+
     assert -32602 in _OPAQUE_MESSAGES
     assert _OPAQUE_MESSAGES[-32602] == "Validation error"
 
@@ -668,6 +680,7 @@ async def test_regression_opaque_codes_validation_is_minus32602() -> None:
 # ---------------------------------------------------------------------------
 # Fix 3: Compression bomb defence — Content-Encoding rejected before buffering
 # ---------------------------------------------------------------------------
+
 
 async def test_regression_gzip_content_encoding_rejected() -> None:
     """Fix 3: Content-Encoding: gzip must be rejected before body buffering (-32600)."""
@@ -716,17 +729,28 @@ async def test_regression_identity_content_encoding_allowed() -> None:
 # T10-004: ResourceExceededError → HTTP 429 (not JSON-RPC 200) + Retry-After
 # ---------------------------------------------------------------------------
 
+
 class _AlwaysRateLimitEngine:
     """Stub engine that unconditionally raises ResourceExceededError on tools/call."""
 
-    async def on_startup(self) -> None: pass
-    async def on_session_start(self, ctx): return ctx
-    async def on_session_end(self, ctx) -> None: pass
-    async def on_shutdown(self) -> None: pass
-    async def on_response(self, ctx, resp): return ctx
+    async def on_startup(self) -> None:
+        pass
+
+    async def on_session_start(self, ctx):
+        return ctx
+
+    async def on_session_end(self, ctx) -> None:
+        pass
+
+    async def on_shutdown(self) -> None:
+        pass
+
+    async def on_response(self, ctx, resp):
+        return ctx
 
     async def on_request(self, ctx, req):
         from mcp_armor.exceptions import ResourceExceededError
+
         if req.method == "tools/call":
             raise ResourceExceededError("stub: rate limit exceeded")
         return ctx
@@ -737,7 +761,7 @@ async def test_resource_exceeded_returns_http_429() -> None:
     limiters and cosai-mcp T10-004 probes can detect it (T10-004 / cosai-mcp T10-004)."""
     from mcp_armor.guard import CoSAIGuard
 
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), _AlwaysRateLimitEngine()])
+    guard = CoSAIGuard([SessionEngine(), _AlwaysRateLimitEngine()])
     app = _make_app(guard)
     async with _client(app) as client:
         init_resp = await client.post("/", json=_payload("initialize"))
@@ -757,7 +781,7 @@ async def test_resource_exceeded_retry_after_header_value() -> None:
     """Retry-After header must be present and parseable as a positive integer."""
     from mcp_armor.guard import CoSAIGuard
 
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False), _AlwaysRateLimitEngine()])
+    guard = CoSAIGuard([SessionEngine(), _AlwaysRateLimitEngine()])
     app = _make_app(guard)
     async with _client(app) as client:
         init_resp = await client.post("/", json=_payload("initialize"))
@@ -776,12 +800,14 @@ async def test_resource_exceeded_retry_after_header_value() -> None:
 # T7-001 / cosai-mcp T07-001: CORS origin validation
 # ---------------------------------------------------------------------------
 
+
 async def _make_cors_app(cors_origins: list[str] | None) -> ArmorMiddleware:
     """Build an ArmorMiddleware with a specific cors_origins setting."""
     from starlette.applications import Starlette
     from starlette.routing import Route
+
     inner = Starlette(routes=[Route("/{path:path}", _echo_handler, methods=["POST"])])
-    guard = CoSAIGuard([SessionEngine(bind_to_dpop=False)])
+    guard = CoSAIGuard([SessionEngine()])
     return ArmorMiddleware(inner, guard, cors_origins=cors_origins)
 
 
@@ -837,6 +863,7 @@ async def test_cors_empty_allowlist_blocks_all_cross_origin() -> None:
 async def test_cors_unconfigured_emits_warning_and_passes(caplog) -> None:
     """cors_origins=None (default) emits a startup warning but does not block requests."""
     import logging
+
     app = await _make_cors_app(None)
     with caplog.at_level(logging.WARNING, logger="mcp_armor.adapters.fastapi"):
         async with _client(app) as client:
@@ -853,37 +880,53 @@ async def test_cors_unconfigured_emits_warning_and_passes(caplog) -> None:
 # T2-004b: tools/list scope filtering via ArmorMiddleware + AuthzEngine
 # ---------------------------------------------------------------------------
 
+
 async def test_tools_list_scope_filter_hides_unpermitted_tools() -> None:
     """tools/list response must not expose tools the caller lacks scope for (T02-004 / D-05)."""
-    from mcp_armor.engines.authz import AuthzEngine
-    from mcp_armor.config import ToolPolicy
     from starlette.applications import Starlette
     from starlette.routing import Route
 
+    from mcp_armor.config import ToolPolicy
+    from mcp_armor.engines.authz import AuthzEngine
+
     # Inner app returns two tools: one public, one admin
     async def _tools_list_handler(request: Request) -> JSONResponse:
-        return JSONResponse({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "tools": [
-                    {"name": "list_items", "description": "read items"},
-                    {"name": "admin_purge", "description": "purge everything"},
-                ]
+        return JSONResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "tools": [
+                        {"name": "list_items", "description": "read items"},
+                        {"name": "admin_purge", "description": "purge everything"},
+                    ]
+                },
             }
-        })
+        )
 
     inner = Starlette(routes=[Route("/{path:path}", _tools_list_handler, methods=["POST"])])
-    guard = CoSAIGuard([
-        SessionEngine(bind_to_dpop=False),
-        AuthzEngine(
-            tool_policies={
-                "list_items": ToolPolicy(required_scopes=("items:read",), user_only=False, destructive=False, tenant_isolated=False),
-                "admin_purge": ToolPolicy(required_scopes=("admin",), user_only=False, destructive=False, tenant_isolated=False),
-            },
-            default_deny=False,
-        ),
-    ])
+    guard = CoSAIGuard(
+        [
+            SessionEngine(),
+            AuthzEngine(
+                tool_policies={
+                    "list_items": ToolPolicy(
+                        required_scopes=("items:read",),
+                        user_only=False,
+                        destructive=False,
+                        tenant_isolated=False,
+                    ),
+                    "admin_purge": ToolPolicy(
+                        required_scopes=("admin",),
+                        user_only=False,
+                        destructive=False,
+                        tenant_isolated=False,
+                    ),
+                },
+                default_deny=False,
+            ),
+        ]
+    )
     app = ArmorMiddleware(inner, guard)
 
     async with _client(app) as client:
@@ -902,3 +945,118 @@ async def test_tools_list_scope_filter_hides_unpermitted_tools() -> None:
     tool_names = [t["name"] for t in tools]
     # admin_purge must be hidden — caller has no scopes, admin_purge requires admin
     assert "admin_purge" not in tool_names
+
+
+# ---------------------------------------------------------------------------
+# A1 regression (AUDIT_2026-06-12): T3 schema validation must be live on the
+# adapter path. The schema is auto-registered from the observed tools/list
+# response (ValidationEngine.on_response); a valid tools/call then PASSES and an
+# inputSchema violation is BLOCKED. Before the fix, _tool_schemas was never
+# populated on any live path, so strict_schema=True rejected EVERY tools/call
+# with "no registered schema" (self-DoS).
+# ---------------------------------------------------------------------------
+
+
+def _schema_inner_app():
+    """Inner MCP app: initialize, tools/list (echo w/ inputSchema), tools/call echo."""
+
+    async def _handler(request: Request) -> JSONResponse:
+        body = await request.body()
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {}
+        method = payload.get("method", "")
+        rid = payload.get("id")
+        if method == "tools/list":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {
+                        "tools": [
+                            {
+                                "name": "echo",
+                                "description": "Echo input",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {"message": {"type": "string"}},
+                                    "required": ["message"],
+                                },
+                            }
+                        ]
+                    },
+                }
+            )
+        if method == "tools/call":
+            args = payload.get("params", {}).get("arguments", {})
+            text = args.get("message", "") if isinstance(args, dict) else ""
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {"content": [{"type": "text", "text": f"Echo: {text}"}]},
+                }
+            )
+        return JSONResponse({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": "1.0"}})
+
+    return Starlette(routes=[Route("/{path:path}", _handler, methods=["POST"])])
+
+
+async def _init_session(client: httpx.AsyncClient) -> str:
+    resp = await client.post("/", json=_payload("initialize"))
+    return resp.headers["mcp-session-id"]
+
+
+async def test_regression_a1_valid_tools_call_passes_after_tools_list() -> None:
+    """A1: after tools/list auto-registers the schema, a schema-valid tools/call PASSES."""
+    from mcp_armor.engines.validation import ValidationEngine
+
+    guard = CoSAIGuard([SessionEngine(), ValidationEngine()])  # default strict_schema=True
+    app = ArmorMiddleware(_schema_inner_app(), guard)
+    async with _client(app) as client:
+        session = await _init_session(client)
+        # tools/list must traverse the guard so the schema is auto-registered.
+        listed = await client.post(
+            "/", json=_payload("tools/list", req_id=2), headers={"mcp-session-id": session}
+        )
+        assert "error" not in listed.json()
+        # A valid call now passes — NOT the old "no registered schema" self-DoS.
+        called = await client.post(
+            "/",
+            json=_payload(
+                "tools/call",
+                {"name": "echo", "arguments": {"message": "hello"}},
+                req_id=3,
+            ),
+            headers={"mcp-session-id": session},
+        )
+        body = called.json()
+    assert "error" not in body, f"valid tools/call was blocked: {body}"
+    assert body["result"]["content"][0]["text"] == "Echo: hello"
+
+
+async def test_regression_a1_input_schema_violation_blocked() -> None:
+    """A1: a tools/call violating the registered inputSchema is BLOCKED (-32602)."""
+    from mcp_armor.engines.validation import ValidationEngine
+
+    guard = CoSAIGuard([SessionEngine(), ValidationEngine()])
+    app = ArmorMiddleware(_schema_inner_app(), guard)
+    async with _client(app) as client:
+        session = await _init_session(client)
+        await client.post(
+            "/", json=_payload("tools/list", req_id=2), headers={"mcp-session-id": session}
+        )
+        # message must be a string per inputSchema; 123 violates type:string.
+        bad = await client.post(
+            "/",
+            json=_payload(
+                "tools/call",
+                {"name": "echo", "arguments": {"message": 123}},
+                req_id=3,
+            ),
+            headers={"mcp-session-id": session},
+        )
+        body = bad.json()
+    assert "error" in body, f"schema violation was not blocked: {body}"
+    assert body["error"]["code"] == -32602
