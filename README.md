@@ -81,13 +81,19 @@ For a runnable quickstart, [examples/quickstart/cosai.yaml](examples/quickstart/
 
 ## Using mcp-armor with TypeScript / non-Python servers
 
-mcp-armor is a Python library and cannot be imported into a TypeScript or Node.js project directly. If your MCP server is written in TypeScript (or any other language), run mcp-armor as a **sidecar proxy** — it sits in front of your server, enforces all 12 CoSAI controls on every request, and forwards clean traffic to your server over HTTP.
+mcp-armor is a Python library and cannot be imported into a TypeScript or Node.js project directly. If your MCP server is written in TypeScript (or any other language), run mcp-armor as a **sidecar** — a shipped reverse proxy that sits in front of your server, enforces all 12 CoSAI controls on every request and response, and forwards clean traffic to your server over HTTP.
 
 ```
 MCP Client → mcp-armor sidecar (Python, :8000) → Your TS server (:3000)
 ```
 
-See [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md) for the full setup guide, Docker Compose example, and notes on a future native TypeScript port.
+```bash
+pip install "mcp-armor[sidecar]"
+mcp-armor-sidecar --config cosai.yaml --upstream http://localhost:3000
+# or run the published image: ghcr.io/ragsvasan/mcp-armor-sidecar:latest
+```
+
+The sidecar ships as the `mcp_armor.sidecar` module (`python -m mcp_armor.sidecar`), a console script, and a Docker image. It covers **HTTP transport only** and adds **~0.4 ms p50** per request (loopback hop, benchmarked on Apple M5). See [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md) for the full setup guide, configuration flags, Docker Compose example, benchmarks, and the stdio limitation.
 
 ## Design
 

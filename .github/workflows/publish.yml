@@ -5,10 +5,18 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
+# Serialize releases per tag. cancel-in-progress is intentionally FALSE here
+# (deviation from the repo default of true): cancelling a half-finished publish
+# could leave PyPI/GHCR in a partial state. Release tags are not rapid-fire.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   id-token: write  # Required for PyPI trusted publisher (OIDC)
   attestations: write  # Required for Sigstore attestation
+  packages: write  # Required to push the sidecar image to GHCR
 
 jobs:
   build:
@@ -94,3 +102,41 @@ jobs:
         with:
           # No API token needed — PyPI trusted publisher via GitHub OIDC
           attestations: true
+
+  docker:
+    name: Build & publish sidecar image (GHCR)
+    # Runs only after the package is published, so the image is never released for
+    # a tag whose PyPI publish failed (no partial release).
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version from tag
+        id: meta
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push sidecar image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-sidecar:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ github.repository }}-sidecar:latest
+
+      - name: Generate image attestation (Sigstore)
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/${{ github.repository }}-sidecar
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

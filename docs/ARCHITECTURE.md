@@ -185,6 +185,25 @@ mcp_armor/adapters/
 hooks into tool dispatch via `_GuardedToolDispatcher`, and guarantees `close_session` fires
 in a `finally` block even when the tool raises.
 
+### Sidecar (reverse proxy)
+
+`mcp_armor/sidecar.py` is not an adapter but a **deployment** of the ASGI adapter:
+it lets a non-Python MCP server (TypeScript, Go, …) sit behind mcp-armor. It wraps
+a hardened `ForwardingApp` (httpx reverse proxy: `follow_redirects=False`,
+`trust_env=False`, hop-by-hop + client-injected `X-Forwarded-*` stripping, header
+dedupe, CRLF guards) with `ArmorMiddleware`, and serves it with uvicorn. It reuses
+the ArmorMiddleware enforcement path verbatim — no enforcement is reimplemented.
+
+```
+client ──▶ ArmorMiddleware ──▶ ForwardingApp ──▶ upstream MCP server (any language)
+           (all 12 engines)    (httpx hop)
+```
+
+Run as `python -m mcp_armor.sidecar` or the `mcp-armor-sidecar` console script
+(install the `sidecar` extra for httpx + uvicorn). **HTTP transport only** — a
+non-HTTP ASGI scope raises `NotImplementedError`; stdio is not covered. See
+[TYPESCRIPT.md](TYPESCRIPT.md).
+
 ---
 
 ## Module Map
@@ -211,6 +230,8 @@ mcp_armor/
     resources.py       T10: call budget, wall-clock, loop depth
     supply_chain.py    T11: tool allowlist + registry sig check
     audit.py           T12: hash-chained JSON Lines append log
+
+  sidecar.py           Reverse-proxy sidecar for non-Python servers (B8)
 
   adapters/
     fastmcp.py         FastMCP wrapper (stub — pending stable API)
@@ -374,9 +395,22 @@ Measured on Apple M5, 20,000 iterations, via `benchmarks/chain_overhead.py`:
 | CPU scanning chain (no audit I/O) | 10 | ~115 µs | ~158 µs |
 | Full chain incl. T12 audit disk I/O | 11 | ~608 µs | ~810 µs |
 
+Sidecar deployment adds one loopback HTTP hop on top of the engine chain. Measured
+on Apple M5, 3,000 iterations, via `benchmarks/sidecar_overhead.py` (minimal guard,
+isolating the hop):
+
+| Path | p50 | p99 |
+|---|---|---|
+| Direct to upstream | ~239 µs | ~373 µs |
+| Through sidecar | ~632 µs | ~864 µs |
+| **Added by the sidecar hop** | **~393 µs** | **~491 µs** |
+
 Notes:
 - RE2 patterns are compiled **once at engine init**, not per request — pattern compilation
   is not in the hot path.
 - The T12 audit writes **2 disk records per call** (request + response) via
   `asyncio.to_thread`. This disk I/O dominates the full-chain figure; the CPU scanning
   chain (T1–T11, no audit I/O) is roughly 5× cheaper.
+- The sidecar hop cost (~0.39 ms p50) is additive to the engine-chain cost. A fully
+  armored request through the sidecar runs on the order of ~0.5 ms p50 over a direct
+  call. Numbers are machine-dependent — re-measure for your hardware.

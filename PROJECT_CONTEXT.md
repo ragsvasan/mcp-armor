@@ -82,10 +82,14 @@ match the source of truth.
   no emitter ships yet.
 - Benchmarks: `benchmarks/chain_overhead.py` (Apple M5, 20k iters) — CPU scan chain
   p50 ≈ 115 µs / p99 ≈ 158 µs; full chain incl T12 audit disk I/O p50 ≈ 608 µs / p99 ≈ 810 µs.
+  `benchmarks/sidecar_overhead.py` (Apple M5, 3k iters) — sidecar loopback hop adds
+  p50 ≈ 0.39 ms / p99 ≈ 0.49 ms over hitting the upstream directly.
 
 **Known limitations (not bugs):**
 - T10 heartbeat config accepted but background monitor not implemented
-- TypeScript servers require the sidecar proxy pattern (see [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md))
+- TypeScript / non-Python servers run behind the shipped sidecar (`mcp_armor.sidecar`,
+  `python -m mcp_armor.sidecar` / `mcp-armor-sidecar` console script / GHCR image).
+  HTTP transport only — stdio is not covered (see [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md)).
 
 ---
 
@@ -95,6 +99,7 @@ match the source of truth.
 mcp_armor/
   __init__.py          Public API: CoSAIGuard, CoSAIContext, all exceptions
   guard.py             CoSAIGuard — assembly, lifecycle, framework integration
+  sidecar.py           B8 — reverse-proxy sidecar (python -m mcp_armor.sidecar) for non-Python servers
   config.py            Typed ArmorConfig frozen dataclasses + cosai.yaml loader
   context.py           CoSAIContext frozen dataclass + ContextVar
   types.py             MCPRequest, MCPResponse, Finding, BudgetState

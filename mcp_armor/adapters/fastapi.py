@@ -355,16 +355,20 @@ class ArmorMiddleware:
             async def buffering_send(message: dict) -> None:
                 nonlocal response_start_msg
                 if message["type"] == "http.response.start":
+                    # Always strip any upstream-set Mcp-Session-Id. Armor owns the
+                    # session namespace: on initialize it substitutes its own
+                    # CSPRNG/HMAC session_id (T7-001); on every other request the
+                    # upstream must NOT be able to set or rotate the client's
+                    # session id mid-stream (a compromised upstream could otherwise
+                    # pin the client to an attacker-chosen session — T7 fixation).
+                    headers = [
+                        (k, v)
+                        for k, v in message.get("headers", [])
+                        if k.lower() != _SESSION_HEADER
+                    ]
                     if is_new_session:
-                        # Strip any upstream Mcp-Session-Id — clients must use armor's
-                        # CSPRNG-generated session_id (T7-001).
-                        headers = [
-                            (k, v)
-                            for k, v in message.get("headers", [])
-                            if k.lower() != _SESSION_HEADER
-                        ]
                         headers.append((_SESSION_HEADER, session_id.encode("ascii")))
-                        message = {**message, "headers": headers}
+                    message = {**message, "headers": headers}
                     response_start_msg = message
                 elif message["type"] == "http.response.body":
                     response_body_parts.append(message.get("body", b""))

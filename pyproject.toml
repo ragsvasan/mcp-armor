@@ -36,15 +36,22 @@ dependencies = [
 [project.optional-dependencies]
 fastmcp = ["fastmcp>=0.1"]
 fastapi = ["fastapi>=0.110", "starlette>=0.36"]
+# B8: the reverse-proxy sidecar (`python -m mcp_armor.sidecar`). httpx makes the
+# upstream hop; uvicorn serves the ASGI app. C1: floor + next-major cap on each.
+sidecar = ["httpx>=0.27,<1", "uvicorn>=0.29,<1"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "pytest-benchmark>=4.0",  # B5: p50/p99 chain-overhead harness
     "httpx>=0.27",
+    "uvicorn>=0.29",  # B8: sidecar serve path + loopback-hop benchmark
     "mypy>=1.9",
     "ruff>=0.4",
 ]
+
+[project.scripts]
+mcp-armor-sidecar = "mcp_armor.sidecar:main"
 
 [project.urls]
 Homepage = "https://github.com/ragsvasan/mcp-armor"

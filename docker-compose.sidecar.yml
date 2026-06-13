@@ -1,0 +1,49 @@
+# Example: put a non-Python (e.g. TypeScript) MCP server behind the mcp-armor
+# sidecar. Only the sidecar is published to the host; the upstream MCP server is
+# reachable solely on the internal compose network, so clients cannot bypass the
+# guard by hitting it directly (see docs/TYPESCRIPT.md → "Limitations").
+#
+#   docker compose -f docker-compose.sidecar.yml up --build
+
+services:
+  mcp-armor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-armor-sidecar
+    environment:
+      # Generate a strong secret and inject it from your secret store, NOT here.
+      # e.g. export ARMOR_SESSION_SECRET=$(python -c "import secrets;print(secrets.token_hex(32))")
+      ARMOR_SESSION_SECRET: ${ARMOR_SESSION_SECRET:?set ARMOR_SESSION_SECRET}
+      ARMOR_UPSTREAM: http://mcp-upstream:3000
+      ARMOR_CORS_ORIGINS: ${ARMOR_CORS_ORIGINS:-}
+    volumes:
+      - ./cosai.yaml:/app/cosai.yaml:ro
+    ports:
+      - "8000:8000"   # the ONLY port exposed to the host
+    networks:
+      - edge      # reachable from the host (published port)
+      - upstream  # reachable to the isolated upstream
+    depends_on:
+      - mcp-upstream
+
+  mcp-upstream:
+    # Replace with your own MCP server image / build. It must speak MCP over HTTP
+    # on :3000 and listen on 0.0.0.0 so the sidecar can reach it on the compose
+    # network. Do NOT add a `ports:` mapping here — and it is on the `internal`
+    # `upstream` network ONLY, so nothing but the sidecar can reach it. This
+    # network isolation is what guarantees all traffic goes through the guard;
+    # without it, any other container could hit :3000 directly and bypass all 12
+    # engines.
+    image: your-org/your-mcp-server:latest
+    expose:
+      - "3000"
+    networks:
+      - upstream
+    environment:
+      NODE_ENV: production
+
+networks:
+  edge: {}
+  upstream:
+    internal: true   # no external connectivity — sidecar-to-upstream only

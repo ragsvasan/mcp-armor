@@ -39,6 +39,61 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
 
 ### Added
 
+- **B8: shipped sidecar for non-Python MCP servers.** `mcp_armor/sidecar.py` runs
+  mcp-armor as a reverse proxy in front of any HTTP-transport MCP server (e.g.
+  TypeScript). It wraps a hardened `ForwardingApp` (httpx with
+  `follow_redirects=False`/`trust_env=False`, hop-by-hop + client-injected
+  `X-Forwarded-*` stripping, header dedupe, CRLF guards) with `ArmorMiddleware`
+  and serves it via uvicorn — reusing the existing enforcement path, not
+  reimplementing it. Runnable as `python -m mcp_armor.sidecar` or the
+  `mcp-armor-sidecar` console script (`[project.scripts]`). httpx + uvicorn are
+  gated behind a new `sidecar` optional-dependencies extra with a clear
+  `SidecarDependencyError` if absent. Replaces the prior doc-only "DIY recipe".
+- **Sidecar Docker image + Compose.** `Dockerfile` (multi-stage, non-root, wheel
+  install with `[sidecar,fastapi]` extras) and `docker-compose.sidecar.yml`
+  (publishes only the sidecar; upstream stays on the internal network).
+  `publish.yml` builds and pushes `ghcr.io/ragsvasan/mcp-armor-sidecar` with
+  Sigstore provenance on every `vX.Y.Z` tag.
+- **Loopback-hop benchmark.** `benchmarks/sidecar_overhead.py` stands up a real
+  upstream + sidecar over loopback and measures the added hop: **~0.39 ms p50 /
+  ~0.49 ms p99** (Apple M5). Published in `docs/TYPESCRIPT.md` and
+  `docs/ARCHITECTURE.md`, replacing "the loopback hop is unbenchmarked".
+
+### Security — hardened (B8 Tier-1 review)
+
+The sidecar treats the upstream as untrusted. From the defense/adversary/security-
+review/mcp_protocol_security panels:
+
+- **Untrusted-upstream response cap** — buffered upstream body is capped
+  (`--max-response-bytes`, default 10 MiB; never trusts `Content-Length`) so a
+  compromised upstream cannot OOM the sidecar.
+- **POST + non-empty body only** — GET/other methods and empty bodies are refused
+  (`405`/`400`) before the upstream hop, closing a path where a request the
+  engines cannot inspect reached the upstream. Optional `--mcp-path` prefix pins
+  the sidecar to one route.
+- **Session-id ownership** — `mcp-session-id` is never forwarded upstream
+  (confused-deputy) and ArmorMiddleware now **unconditionally** strips any
+  upstream-set `mcp-session-id` from responses (not just on `initialize`), so a
+  compromised upstream cannot rotate the client's session mid-stream (T7).
+- **Header/forwarding hygiene** — forwarded `Content-Type` is normalized to
+  canonical `application/json` (closes a validate-one/forward-another desync);
+  response header **names** as well as values are CRLF-filtered; the upstream
+  httpx client uses a no-store cookie jar (no cross-session cookie bleed);
+  `follow_redirects=False` / `trust_env=False` retained.
+- **Deploy isolation** — `docker-compose.sidecar.yml` puts the upstream on an
+  `internal:` network reachable only by the sidecar; `publish.yml`'s image job now
+  runs after the PyPI publish (no partial release).
+
+### Scope / boundaries
+
+- **Sidecar is HTTP-transport only.** `ArmorMiddleware` cannot sit on a stdio
+  pipe; the sidecar's `ForwardingApp` raises `NotImplementedError` on any
+  non-HTTP ASGI scope. This boundary is explicit and tested
+  (`test_forwarding_app_refuses_non_http_scope`).
+- **Deferred:** enforcing the MCP `notifications/initialized` handshake before
+  `tools/call` (raised by the protocol-security panel) is a separate change —
+  real spec gap but carries client-compat risk and is not introduced by B8.
+
 - **T1 config: `require_cnf_binding`** — flag to enforce DPoP sender-constraint
   (RFC 9449 §4.3). Defaults `True` (fail-closed). Set `False` only when using
   issuers that do not mint DPoP-bound tokens.
@@ -53,8 +108,19 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
   (non-DPoP path completeness).
 - 12 existing DPoP property-isolation tests downgraded to `require_cnf_binding=False`
   to isolate the gate from the property each test targets.
+- 24 new sidecar tests in `tests/adapters/test_sidecar.py`, entering at the public
+  entry points (`build_app`, `main`, `ForwardingApp`): full initialize → tools/list
+  → tools/call through the sidecar with a stub upstream; T4 injection blocked on the
+  request phase (`-32003`, opaque); T5 PII blocked on the response phase (`-32004`);
+  clean call passes; missing-session rejected; HTTP-only boundary
+  (`NotImplementedError`); path hardening; `build_app` arg contract; clear error
+  when the `sidecar` extra is missing. Plus the Tier-1 hardening regressions:
+  oversized-response cap, GET/empty-body/out-of-prefix refused, canonical
+  Content-Type, `mcp-session-id` not forwarded upstream nor leaked from upstream,
+  response-header CRLF stripped, no cross-session cookie bleed, guard.startup runs
+  (and fails closed) via lifespan.
 
-**Test count:** 587 passing (586 → +1 completeness test).
+**Test count:** 611 passing (587 → +24 sidecar tests).
 
 ## [1.1.0] — 2026-06-12
 
