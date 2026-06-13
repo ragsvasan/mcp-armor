@@ -29,7 +29,8 @@ CoSAI T1–T12 mapped to OWASP MCP Top 10, ISO 27001:2022, NIST AI RMF 2.0, and 
 - T1-001: No `Authorization` header — server accepts unauthenticated requests
 - T1-002: Token replay — used `jti` accepted a second time
 - T1-003: Cross-session token — token issued for session A used in session B
-- T1-004: DPoP binding failure — bearer token without required proof-of-possession
+- T1-004a: DPoP proof validation — bearer token without required proof-of-possession (RFC 9449 §7)
+- T1-004b: DPoP sender-constraint — access token lacking `cnf.jkt` when DPoP is in force (RFC 9449 §4.3). Without this check, a stolen non-bound token is vulnerable to replay-with-attacker-minted-proof attacks. Fail-closed default; gated by `require_cnf_binding` config flag
 
 **ISO 27001 controls:** A.9.4.2 (secure log-on procedures), A.9.4.3 (password management system)  
 **NIST AI RMF:** GV-OV.OA-2 (AI risk governance), MG-MT-2 (monitoring)  
@@ -61,7 +62,13 @@ CoSAI T1–T12 mapped to OWASP MCP Top 10, ISO 27001:2022, NIST AI RMF 2.0, and 
 - T3-002: Command injection — `; rm -rf /` in a string argument
 - T3-003: Path traversal — `../../etc/passwd` in a file path argument
 - T3-004: SQL injection — unparameterised query construction from tool input
-- T3-005: Schema violation — unknown fields accepted when strict mode is off
+- T3-005: Schema violation — a `tools/call` whose arguments violate the tool's declared JSON Schema
+
+**JSON-Schema validation (v1.1.0):** schema enforcement is LIVE on the adapter path. Each
+tool's `inputSchema` auto-registers from the observed `tools/list` response
+(`ValidationEngine.on_response`) — operators do **not** call `register_tool_schemas()`
+manually. A schema-valid `tools/call` passes; a violation is rejected with JSON-RPC error
+`-32602`. (Previously the schema check was defined but never invoked, so it had no effect.)
 
 **ISO 27001 controls:** A.14.2.5 (secure system engineering), A.8.28 (secure coding)  
 **NIST AI RMF:** MG-MR-2 (risk response), MG-MT-1 (monitoring)  
@@ -139,6 +146,13 @@ invisible-character, and encoded-payload injection bypasses.
 - T7-003: Cross-transport replay — stdio session token reused over HTTP
 - T7-004: Context bleed — previous session's state carried into new session
 
+**Scope (v1.1.0):** `SessionEngine` enforces transport-bound session **continuity** only — a
+session established on one transport cannot be replayed over another. It does **not**
+perform DPoP sender-constraint binding; the former `bind_session_to_dpop` /
+`bind_to_dpop` flag has been removed and is now an unknown config key. DPoP
+proof-of-possession is enforced at **T1** by `AuthEngine` via the access token's `cnf.jkt`
+claim, not by T7.
+
 **ISO 27001 controls:** A.9.4.2, A.9.4.3  
 **NIST AI RMF:** MG-MT-2, GV-OV.OA-2  
 **CWE:** CWE-384 (session fixation), CWE-287 (improper authentication)
@@ -153,6 +167,11 @@ invisible-character, and encoded-payload injection bypasses.
 - T8-001: Server bound to 0.0.0.0 — accessible to all local network interfaces
 - T8-002: SSRF via tool arguments — tool reaches AWS IMDS, internal APIs, or localhost services
 - T8-003: Shadow MCP server — second MCP server running on same host, reachable from agent
+
+**Startup bind check (v1.1.0):** wired via the T8 config keys `bind_host` / `bind_port`.
+When `bind_host` is set, `guard.startup()` raises `NetworkBindingError` on a public bind
+(e.g. `0.0.0.0`) unless `allow_public_bind: true`. Per-request SSRF inspection of tool
+arguments is always on, independent of these keys.
 
 **ISO 27001 controls:** A.13.1.3 (segregation in networks), A.8.20 (network security)  
 **NIST AI RMF:** GV-OV.OA-1, MP-ID-2  
@@ -223,11 +242,20 @@ it is no longer a known limitation.
 - T12-003: PII in logs — raw tool parameters stored (privacy violation)
 - T12-004: Missing DAG parent — concurrent calls cannot be ordered in the audit timeline
 
-**HMAC chain signing (v0.2.0):** set `ARMOR_AUDIT_HMAC_KEY` (64-char hex / 32 bytes) to
-add an unforgeable `chain_hmac` field (`HMAC-SHA256(key, canonical_JSON)`) to every
-record. Pure SHA-256 chaining detects field tampering but allows an attacker with write
-access to truncate the log and recalculate all hashes; HMAC makes this computationally
-infeasible without the key.
+**HMAC chain signing (v1.1.0):** `ARMOR_AUDIT_HMAC_KEY` (64-char hex / 32 bytes) is
+**required** at startup when T12 is enabled (`T12.require_hmac_key` defaults to `true`).
+For local development it can be opted out with `T12.require_hmac_key: false` or
+`ARMOR_AUDIT_ALLOW_UNSIGNED=1`. The key adds an unforgeable `chain_hmac` field
+(`HMAC-SHA256(key, canonical_JSON)`) to every record. Pure SHA-256 chaining detects field
+tampering but allows an attacker with write access to truncate the log and recalculate all
+hashes; HMAC makes this computationally infeasible without the key.
+
+**Ed25519 registry signatures remain opt-in** (`require_registry_signature` defaults to
+`false`) — only the audit-chain HMAC key is mandatory.
+
+**Rollback-to-empty closed (v1.1.0):** deleting the audit log while the `.hwm` sidecar or
+the `.hmac_enabled` marker survives now raises `AuditChainError` at startup, so an attacker
+cannot reset the chain to an empty state to erase history.
 
 **`.hmac_enabled` sticky marker:** once written with HMAC enabled, startup raises
 `AuditChainError` if `ARMOR_AUDIT_HMAC_KEY` is absent — silent downgrade is impossible.

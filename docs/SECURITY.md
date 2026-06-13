@@ -49,6 +49,8 @@ Out of scope:
 
 **Audit log integrity.** The T12 audit log is hash-chained (SHA-256). Tampering with any entry breaks the chain at the next entry. File-level append-only enforcement (`chattr +a` on Linux) is the server operator's responsibility — document that this is not enforced by the library.
 
+**DPoP sender-constraint (RFC 9449 §4.3).** When DPoP is in force — either because `require_dpop=True` or because a DPoP proof is presented — the access token **must** be sender-constrained via a `cnf.jkt` claim. Without this binding, a stolen non-sender-constrained token can be replayed with any attacker-minted valid DPoP proof, defeating the binding guarantee. `AuthEngine` fails closed: if DPoP is in force and the token lacks `cnf.jkt`, the request is rejected with `AuthenticationError(RFC 9449 §4.3)`. Operators using non-conformant token issuers that do not mint DPoP-bound tokens can opt out via `T1.require_cnf_binding: false` in config, but this is **not recommended** — it trades correctness for compatibility with a non-compliant issuer.
+
 ---
 
 ## Destructive Tool Gate — Known Limitations
@@ -99,7 +101,12 @@ tampering but does NOT prevent a sophisticated attacker who has write access to 
 from truncating it and recalculating all chain hashes from scratch — erasing evidence
 without detection.
 
-**To close this gap, set the `ARMOR_AUDIT_HMAC_KEY` environment variable** to a
+As of v1.1.0, `ARMOR_AUDIT_HMAC_KEY` is **required at startup** whenever T12 is enabled
+(`T12.require_hmac_key` defaults to `true`). The server refuses to start without it unless
+you explicitly opt out for local development via `T12.require_hmac_key: false` in
+`cosai.yaml` or the `ARMOR_AUDIT_ALLOW_UNSIGNED=1` environment variable.
+
+**Set the `ARMOR_AUDIT_HMAC_KEY` environment variable** to a
 hex-encoded 32-byte (64-character hex) secret.
 
 Generate a key:
@@ -153,6 +160,20 @@ HMAC by unsetting the env var.
 To intentionally downgrade (not recommended — treat as a security event): remove the
 `.hmac_enabled` sidecar file and document the reason.
 
+**Rollback-to-empty is closed (v1.1.0).** Deleting the audit log itself while either the
+`.hwm` high-water-mark sidecar or the `.hmac_enabled` marker survives raises
+`AuditChainError` at startup. An attacker can no longer wipe the log to an empty state to
+erase history while leaving the sidecars in place.
+
+---
+
+## Registry Signature Verification
+
+Ed25519 registry-signature verification (T11) is **opt-in**:
+`require_registry_signature` defaults to `false`. Only the T12 audit-chain HMAC key is
+mandatory by default. Enable registry signing explicitly when your deployment distributes
+signed tool manifests.
+
 ---
 
 ## `dry_run` Mode
@@ -181,11 +202,11 @@ Use it only for testing and configuration tuning in non-production environments.
 
 The following are known limitations, not vulnerabilities. They are documented here for transparency and tracked in [docs/COVERAGE.md](COVERAGE.md).
 
-1. **ProtectionEngine blocks, does not redact:** When PII is detected in a tool response, the response is blocked entirely. It is not scrubbed/redacted and forwarded. This is a conservative choice — some deployments may need redaction instead of blocking.
+1. **Response engines (T4 / T5 / T9) block, they do not scrub:** When PII, a secret, or an injection pattern is detected in a tool response, the response is blocked entirely — an opaque error replaces the whole body. It is not scrubbed/redacted/stripped in place and forwarded. The only in-place redaction is `TrustEngine.sanitize()`, an explicit operator call that is not part of the automatic response path. This is a conservative choice — some deployments may need redaction instead of blocking.
 
 2. **RE2 fallback (partially mitigated):** If `google-re2` is not installed, mcp-armor falls back to stdlib `re`. `BoundaryEngine._scan()` truncates strings to 8,192 chars before pattern matching to bound worst-case time, but this is defence-in-depth, not a complete fix. Install `google-re2` in production for linear-time guarantees.
 
-3. **IntegrityEngine drift detection is per-call-chain only (HTTP adapter):** `ArmorMiddleware` creates a fresh `CoSAIContext` for each HTTP request and does not restore session context between requests. As a result, `IntegrityEngine`'s mid-session drift detection (T6-001 — rug-pull) does not fire across separate HTTP round-trips; the manifest hash accumulated in one request's ctx is not visible to the next. Drift detection works correctly within a single call chain (e.g. `wrap_dispatcher` where the same ctx is threaded through, or a long-running streaming session). Fix planned: persist and restore ctx in `_active_sessions` across requests. Workaround: call `register_tool_schemas()` at startup to snapshot the baseline manifest — supply chain and integrity checks still fire on every `tools/list` response for allowlist, typosquat, homoglyph, and shadow violations.
+3. **IntegrityEngine drift detection is per-call-chain only (HTTP adapter):** `ArmorMiddleware` creates a fresh `CoSAIContext` for each HTTP request and does not restore session context between requests. As a result, `IntegrityEngine`'s mid-session drift detection (T6-001 — rug-pull) does not fire across separate HTTP round-trips; the manifest hash accumulated in one request's ctx is not visible to the next. Drift detection works correctly within a single call chain (e.g. `wrap_dispatcher` where the same ctx is threaded through, or a long-running streaming session). Fix planned: persist and restore ctx in `_active_sessions` across requests. Note: supply chain and integrity checks still fire on every `tools/list` response for allowlist, typosquat, homoglyph, and shadow violations — the manifest baseline is snapshotted automatically from the observed `tools/list` response, with no operator action required.
 
 ---
 
@@ -236,7 +257,7 @@ Required before deploying mcp-armor in production:
 
 | # | Requirement | How |
 |---|-------------|-----|
-| 1 | Set `ARMOR_AUDIT_HMAC_KEY` | `python -c "import secrets; print(secrets.token_hex(32))"` — store in secret manager |
+| 1 | Set `ARMOR_AUDIT_HMAC_KEY` (required) | `python -c "import secrets; print(secrets.token_hex(32))"` — store in secret manager; startup fails without it unless `require_hmac_key: false` / `ARMOR_AUDIT_ALLOW_UNSIGNED=1` |
 | 2 | Do NOT set `dry_run: true` | Remove or set `dry_run: false` in `cosai.yaml` |
 | 3 | Install `google-re2` | `pip install google-re2` — linear-time regex, no catastrophic backtracking |
 | 4 | Set `T12.chain_verify_on_startup: true` | Default — ensures startup raises on tampered log |
@@ -251,6 +272,6 @@ Required before deploying mcp-armor in production:
 
 | Version | Supported |
 |---------|-----------|
-| 0.2.x (current) | Yes |
-| 0.1.x | Yes (security fixes backported) |
-| < 0.1 | No |
+| 1.1.x (current) | Yes |
+| 0.2.x | Yes (security fixes backported) |
+| < 0.2 | No |
