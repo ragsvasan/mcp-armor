@@ -1060,3 +1060,101 @@ async def test_regression_a1_input_schema_violation_blocked() -> None:
         body = bad.json()
     assert "error" in body, f"schema violation was not blocked: {body}"
     assert body["error"]["code"] == -32602
+
+
+# ---------------------------------------------------------------------------
+# B8 follow-up: MCP §3.2 initialization handshake gate at the public path
+# ---------------------------------------------------------------------------
+
+
+def _handshake_app(require: bool) -> ArmorMiddleware:
+    """ArmorMiddleware whose SessionEngine optionally enforces §3.2 handshake."""
+    guard = CoSAIGuard([SessionEngine(require_initialized_handshake=require)])
+    return _make_app(guard)
+
+
+async def test_handshake_off_call_after_initialize_passes() -> None:
+    """Flag off (default): tools/call straight after initialize is allowed —
+    proves the gate is opt-in and existing deployments are unaffected."""
+    async with _client(_handshake_app(require=False)) as client:
+        session = await _init_session(client)
+        resp = await client.post(
+            "/", json=_payload("tools/call", req_id=2), headers={"mcp-session-id": session}
+        )
+    assert resp.status_code == 200
+    assert "error" not in resp.json()
+
+
+async def test_handshake_on_call_before_initialized_rejected() -> None:
+    """Flag on: tools/call before notifications/initialized → -32006 SessionError."""
+    async with _client(_handshake_app(require=True)) as client:
+        session = await _init_session(client)
+        resp = await client.post(
+            "/", json=_payload("tools/call", req_id=2), headers={"mcp-session-id": session}
+        )
+    body = resp.json()
+    assert "error" in body, f"handshake gate did not fire: {body}"
+    assert body["error"]["code"] == -32006
+
+
+async def test_handshake_on_call_after_initialized_passes() -> None:
+    """Flag on: once notifications/initialized advances the session to ACTIVE,
+    tools/call passes."""
+    async with _client(_handshake_app(require=True)) as client:
+        session = await _init_session(client)
+        notif = await client.post(
+            "/",
+            json=_payload("notifications/initialized", req_id=2),
+            headers={"mcp-session-id": session},
+        )
+        assert "error" not in notif.json()
+        resp = await client.post(
+            "/", json=_payload("tools/call", req_id=3), headers={"mcp-session-id": session}
+        )
+    assert resp.status_code == 200
+    assert "error" not in resp.json(), resp.json()
+
+
+async def test_regression_handshake_unknown_session_not_auto_active() -> None:
+    """Panel FIX[1]: with the gate on, a validly-minted session this instance
+    never saw `initialize` for (cross-worker / post-eviction) must fail CLOSED —
+    rejected with -32006, NOT admitted via a fresh default-ACTIVE context."""
+    app = _handshake_app(require=True)
+    token = app._guard.mint_session_id("http")  # valid signature, unknown to this app
+    async with _client(app) as client:
+        resp = await client.post(
+            "/", json=_payload("tools/call", req_id=2), headers={"mcp-session-id": token}
+        )
+    body = resp.json()
+    assert "error" in body, f"unknown session was admitted (gate bypassed): {body}"
+    assert body["error"]["code"] == -32006
+
+
+async def test_handshake_off_unknown_session_failopen_preserved() -> None:
+    """Contrast: with the gate OFF, the documented F4/F7 single-worker fail-open
+    is unchanged — an unknown valid session is still admitted (no behaviour change)."""
+    app = _handshake_app(require=False)
+    token = app._guard.mint_session_id("http")
+    async with _client(app) as client:
+        resp = await client.post(
+            "/", json=_payload("tools/call", req_id=2), headers={"mcp-session-id": token}
+        )
+    assert "error" not in resp.json()
+
+
+async def test_exploit_handshake_multiworker_failopen() -> None:
+    """Panel EXPLOIT[1]: two ArmorMiddleware instances sharing the session secret
+    but with separate _active_sessions (the multi-worker topology). Initialize on
+    instance A; replay the returned token as a first `tools/call` on instance B
+    with the gate on. B never saw the handshake, so it must reject (-32006)."""
+    app_a = _handshake_app(require=True)
+    app_b = _handshake_app(require=True)  # same env ARMOR_SESSION_SECRET → same signer
+    async with _client(app_a) as client_a, _client(app_b) as client_b:
+        session = await _init_session(client_a)
+        # The token validly verifies on B (shared secret) but B has no handshake state.
+        resp = await client_b.post(
+            "/", json=_payload("tools/call", req_id=2), headers={"mcp-session-id": session}
+        )
+    body = resp.json()
+    assert "error" in body, f"cross-worker replay bypassed the gate: {body}"
+    assert body["error"]["code"] == -32006

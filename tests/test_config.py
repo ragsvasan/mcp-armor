@@ -138,6 +138,38 @@ def test_load_disabled_threat_returns_none(tmp_path: Path) -> None:
     assert cfg.t1 is None
 
 
+def test_load_t7_require_initialized_handshake_default_false(tmp_path: Path) -> None:
+    p = _write(tmp_path, "version: 1\nthreats:\n  T7:\n    enabled: true\n")
+    cfg = load_config(p)
+    assert cfg.t7 is not None
+    assert cfg.t7.require_initialized_handshake is False
+
+
+def test_load_t7_require_initialized_handshake_true(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path,
+        """
+        version: 1
+        threats:
+          T7:
+            enabled: true
+            require_initialized_handshake: true
+    """,
+    )
+    cfg = load_config(p)
+    assert cfg.t7 is not None
+    assert cfg.t7.require_initialized_handshake is True
+
+
+def test_unknown_t7_field_rejected(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path,
+        "version: 1\nthreats:\n  T7:\n    enabled: true\n    bogus_field: 1\n",
+    )
+    with pytest.raises(ConfigError):
+        load_config(p)
+
+
 def test_load_t11_allowlist(tmp_path: Path) -> None:
     p = _write(
         tmp_path,

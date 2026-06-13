@@ -65,6 +65,27 @@ CONTENT_BEARING_METHODS: frozenset[str] = frozenset(
 )
 
 
+# T7 — MCP §3.2 lifecycle handshake phases. Tracked per session in
+# CoSAIContext and enforced by SessionEngine ONLY when
+# T7.require_initialized_handshake is enabled (opt-in; default off).
+#   ACTIVE  — full method set permitted (the default: a session this worker
+#             never saw `initialize` for is treated as already-initialized so
+#             enforcement is scoped to sessions whose handshake this worker is
+#             actually tracking — consistent with the F4/F7 single-worker model).
+#   PENDING — `initialize` was processed but `notifications/initialized` has not
+#             yet arrived; only the handshake methods below are permitted.
+HANDSHAKE_PENDING = "pending"
+HANDSHAKE_ACTIVE = "active"
+
+# MCP §3.2: before the client sends `notifications/initialized`, the only
+# requests permitted are the initialize handshake itself and pings. Everything
+# else (tools/list, tools/call, resources/*, prompts/*, …) is rejected while the
+# session is PENDING.
+HANDSHAKE_ALLOWED_METHODS: frozenset[str] = frozenset(
+    {"initialize", "notifications/initialized", "ping"}
+)
+
+
 def scannable_strings(req: MCPRequest) -> dict[str, Any]:
     """
     Return the attacker-influenced fields of a content-bearing request that

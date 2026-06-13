@@ -214,6 +214,96 @@ def test_session_engine_construction_fails_closed_without_secret(monkeypatch) ->
         SessionEngine()
 
 
+# --------------------------------------------------------------------------- #
+# MCP §3.2 initialization handshake gate (opt-in)
+# --------------------------------------------------------------------------- #
+
+
+def _handshake_engine(secret: bytes = _SECRET) -> SessionEngine:
+    return SessionEngine(signer=SessionSigner(secret), require_initialized_handshake=True)
+
+
+async def test_handshake_gate_off_by_default_allows_call_after_initialize() -> None:
+    """Default (flag off): a tools/call immediately after initialize is allowed —
+    no behaviour change for existing deployments."""
+    eng = _engine()
+    ctx, token = _ctx_for(eng)
+    ctx = await eng.on_request(ctx, make_request(method="initialize", session_id=token))
+    # No notifications/initialized sent — must still pass with the flag off.
+    out = await eng.on_request(ctx, make_request(method="tools/call", session_id=token))
+    assert out is not None
+
+
+async def test_handshake_initialize_marks_session_pending() -> None:
+    from mcp_armor.types import HANDSHAKE_PENDING
+
+    eng = _handshake_engine()
+    ctx, token = _ctx_for(eng)
+    ctx = await eng.on_request(ctx, make_request(method="initialize", session_id=token))
+    assert ctx.handshake_phase == HANDSHAKE_PENDING
+
+
+async def test_handshake_call_before_initialized_rejected() -> None:
+    """tools/call while PENDING (initialize seen, notification not yet) → SessionError."""
+    eng = _handshake_engine()
+    ctx, token = _ctx_for(eng)
+    ctx = await eng.on_request(ctx, make_request(method="initialize", session_id=token))
+    with pytest.raises(SessionError, match="handshake"):
+        await eng.on_request(ctx, make_request(method="tools/call", session_id=token))
+
+
+async def test_handshake_tools_list_before_initialized_rejected() -> None:
+    """tools/list is also gated — the original finding named it explicitly."""
+    eng = _handshake_engine()
+    ctx, token = _ctx_for(eng)
+    ctx = await eng.on_request(ctx, make_request(method="initialize", session_id=token))
+    with pytest.raises(SessionError, match="handshake"):
+        await eng.on_request(ctx, make_request(method="tools/list", session_id=token))
+
+
+async def test_handshake_notification_advances_to_active_then_call_passes() -> None:
+    from mcp_armor.types import HANDSHAKE_ACTIVE
+
+    eng = _handshake_engine()
+    ctx, token = _ctx_for(eng)
+    ctx = await eng.on_request(ctx, make_request(method="initialize", session_id=token))
+    ctx = await eng.on_request(
+        ctx, make_request(method="notifications/initialized", session_id=token)
+    )
+    assert ctx.handshake_phase == HANDSHAKE_ACTIVE
+    out = await eng.on_request(ctx, make_request(method="tools/call", session_id=token))
+    assert out is not None
+
+
+async def test_handshake_ping_allowed_while_pending() -> None:
+    """MCP §3.2 permits ping before the handshake completes."""
+    eng = _handshake_engine()
+    ctx, token = _ctx_for(eng)
+    ctx = await eng.on_request(ctx, make_request(method="initialize", session_id=token))
+    out = await eng.on_request(ctx, make_request(method="ping", session_id=token))
+    assert out is not None
+
+
+async def test_handshake_default_active_session_not_gated() -> None:
+    """A session this engine never saw `initialize` for defaults to ACTIVE, so the
+    gate is inert (matches the F4/F7 single-worker fail-open model)."""
+    eng = _handshake_engine()
+    ctx, token = _ctx_for(eng)  # fresh ctx → handshake_phase defaults to ACTIVE
+    out = await eng.on_request(ctx, make_request(method="tools/call", session_id=token))
+    assert out is not None
+
+
+async def test_handshake_forged_token_rejected_before_gate() -> None:
+    """Signature verification runs first: a forged token raises T7-001, not the
+    handshake message — the gate must not become a softer bypass of fixation."""
+    eng = _handshake_engine()
+    ctx = make_ctx("attacker-session")
+    req = make_request(method="tools/call", session_id="attacker-session")
+    with pytest.raises(SessionError) as exc:
+        await eng.on_request(ctx, req)
+    assert "handshake" not in str(exc.value)
+
+
 async def test_regression_protect_tool_works_with_t7_session_engine_enabled() -> None:
     """Defense FIX[1]: guard.protect()'s wrapper used to mint a raw uuid; with
     T7 enabled SessionEngine.on_request then verified that uuid and raised

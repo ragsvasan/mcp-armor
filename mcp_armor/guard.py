@@ -137,7 +137,11 @@ class CoSAIGuard:
             )
 
         if cfg.t7 is not None:
-            engines.append(SessionEngine())
+            engines.append(
+                SessionEngine(
+                    require_initialized_handshake=cfg.t7.require_initialized_handshake
+                )
+            )
 
         if cfg.t8 is not None:
             engines.append(

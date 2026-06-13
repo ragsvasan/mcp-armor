@@ -13,7 +13,13 @@ import logging
 
 from ..context import CoSAIContext
 from ..exceptions import SessionError
-from ..types import MCPRequest, MCPResponse
+from ..types import (
+    HANDSHAKE_ACTIVE,
+    HANDSHAKE_ALLOWED_METHODS,
+    HANDSHAKE_PENDING,
+    MCPRequest,
+    MCPResponse,
+)
 from ._session_token import SessionSigner
 
 log = logging.getLogger(__name__)
@@ -48,16 +54,29 @@ class SessionEngine:
     def __init__(
         self,
         signer: SessionSigner | None = None,
+        require_initialized_handshake: bool = False,
     ) -> None:
         # Fail-closed: SessionSigner.from_env() raises if ARMOR_SESSION_SECRET
         # is absent — the guard build aborts rather than minting unverifiable
         # tokens. Tests inject an explicit signer.
         self._signer = signer if signer is not None else SessionSigner.from_env()
+        # Opt-in MCP §3.2 lifecycle enforcement. Off by default because many
+        # clients/servers do not strictly send `notifications/initialized`
+        # before their first call, so enforcing it carries compatibility risk.
+        self._require_initialized_handshake = require_initialized_handshake
 
     @property
     def signer(self) -> SessionSigner:
         """Exposed so the guard can mint a token on a new session."""
         return self._signer
+
+    @property
+    def require_initialized_handshake(self) -> bool:
+        """Whether the MCP §3.2 lifecycle gate is enforced. Read by the ASGI
+        adapter so it can fail an unknown-but-valid session CLOSED (PENDING)
+        instead of fail-open (ACTIVE) when the gate is on — otherwise a
+        cross-worker / post-eviction request would silently bypass the gate."""
+        return self._require_initialized_handshake
 
     async def on_startup(self) -> None:
         pass
@@ -79,6 +98,27 @@ class SessionEngine:
         # transport. A forged ID (fixation) or a token minted for a different
         # transport (cross-transport replay) fails the constant-time compare.
         self._signer.verify(ctx.session_id, req.transport)
+
+        if not self._require_initialized_handshake:
+            return ctx
+
+        # MCP §3.2 lifecycle gate (opt-in). Run AFTER signature verification so a
+        # forged/cross-transport token is still rejected as T7-001/003 first.
+        method = req.method
+        if method == "initialize":
+            # Handshake (re)started — hold the session PENDING until the client
+            # acknowledges with `notifications/initialized`.
+            return ctx.with_handshake_phase(HANDSHAKE_PENDING)
+        if method == "notifications/initialized":
+            # Handshake complete — promote to ACTIVE (idempotent).
+            return ctx.with_handshake_phase(HANDSHAKE_ACTIVE)
+        if ctx.handshake_phase != HANDSHAKE_ACTIVE and method not in HANDSHAKE_ALLOWED_METHODS:
+            raise SessionError(
+                "request rejected: the MCP initialization handshake is not "
+                "complete — the client must send the `notifications/initialized` "
+                "notification after `initialize` and before any other method "
+                "(MCP spec §3.2 / T7)"
+            )
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:

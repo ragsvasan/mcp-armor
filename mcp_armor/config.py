@@ -60,7 +60,7 @@ _KNOWN_T6 = frozenset(
         "typosquat_distance",
     }
 )
-_KNOWN_T7 = frozenset({"enabled"})
+_KNOWN_T7 = frozenset({"enabled", "require_initialized_handshake"})
 _KNOWN_T8 = frozenset({"enabled", "allow_public_bind", "block_rfc1918", "bind_host", "bind_port"})
 _KNOWN_T9 = frozenset({"enabled", "max_output_length", "strip_injection_patterns"})
 _KNOWN_T10 = frozenset(
@@ -209,9 +209,27 @@ class T6Config:
 class T7Config:
     # T7 is transport-bound session continuity only — there is no DPoP-binding
     # knob here. DPoP sender-constraint is enforced by the T1 AuthEngine
-    # (cnf.jkt). Kept as a marker dataclass so `T7: {enabled: true}` toggles the
-    # SessionEngine on/off.
-    pass
+    # (cnf.jkt).
+    #
+    # require_initialized_handshake (opt-in, default False): enforce the MCP §3.2
+    # lifecycle — reject every method except the handshake itself (and ping)
+    # until the client sends `notifications/initialized` after `initialize`.
+    # Default off because not all clients/servers strictly emit the notification
+    # before their first call, so enabling it carries client-compatibility risk.
+    #
+    # Scope — this gate tracks per-session handshake phase across requests, which
+    # only the HTTP session transport (ArmorMiddleware) has. Consequences:
+    #   - It is INERT on single-call transports — the @guard.protect decorator's
+    #     stdio fallback, the raw dispatcher, and the FastMCP per-tool hook each
+    #     synthesize a one-shot context with no initialize→initialized sequence,
+    #     so there is no handshake to enforce there.
+    #   - Multi-worker HTTP without a shared session store fails CLOSED: a request
+    #     landing on a worker that did not process `initialize` for that session
+    #     is rejected (the unknown-session context is marked PENDING, not the
+    #     default ACTIVE), so the gate cannot be silently bypassed by routing the
+    #     follow-up request to a different worker. Single-worker / sticky-session
+    #     deployments are unaffected.
+    require_initialized_handshake: bool = False
 
 
 @dataclass(frozen=True)
@@ -393,7 +411,15 @@ def load_config(path: str | Path) -> ArmorConfig:
 
     # T7
     t7_raw = _t("T7")
-    t7 = T7Config() if t7_raw is not None else None
+    t7 = (
+        T7Config(
+            require_initialized_handshake=bool(
+                t7_raw.get("require_initialized_handshake", False)
+            )
+        )
+        if t7_raw is not None
+        else None
+    )
 
     # T8
     t8_raw = _t("T8")

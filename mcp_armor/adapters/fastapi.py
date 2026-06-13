@@ -98,6 +98,18 @@ class ArmorMiddleware:
         # Tracks open sessions for clean shutdown — session_id → CoSAIContext
         self._active_sessions: dict[str, Any] = {}
 
+        # T7 §3.2: is the initialization-handshake gate enforced? When True, an
+        # unknown-but-HMAC-valid session (one this worker never saw `initialize`
+        # for) must fail CLOSED — marked PENDING so the gate rejects content
+        # methods — instead of the F4/F7 fail-open fresh ACTIVE context, which
+        # would let a cross-worker / post-eviction request bypass the gate.
+        from ..engines.session import SessionEngine
+
+        self._handshake_enforced = any(
+            isinstance(e, SessionEngine) and e.require_initialized_handshake
+            for e in guard._engines
+        )
+
         # Fix 9: wire the ResourceEngine eviction callback so reaped sessions
         # are also removed from _active_sessions (prevents memory leak).
         from ..engines.resources import ResourceEngine
@@ -290,6 +302,16 @@ class ArmorMiddleware:
                 # this path (documented in the F4/F7 residual risk). Treat
                 # this branch as a known fail-open limitation, not a guard.
                 ctx = CoSAIContext.new(session_id, transport="http")
+                # T7 §3.2: but when the handshake gate is ON, fail CLOSED here.
+                # This worker never observed initialize→initialized for this
+                # session, so admitting it as the default ACTIVE would silently
+                # bypass the gate (cross-worker replay / post-eviction). Mark it
+                # PENDING so SessionEngine.on_request rejects any non-handshake
+                # method until a fresh handshake completes on this worker.
+                if self._handshake_enforced:
+                    from ..types import HANDSHAKE_PENDING
+
+                    ctx = ctx.with_handshake_phase(HANDSHAKE_PENDING)
         set_context(ctx)
 
         # Fix 2: expose the live CoSAIContext via ContextVar so @guard.protect

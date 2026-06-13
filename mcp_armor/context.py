@@ -6,7 +6,7 @@ import time
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 
-from .types import BudgetState, Finding
+from .types import HANDSHAKE_ACTIVE, BudgetState, Finding
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,11 @@ class CoSAIContext:
     audit_parent_id: str | None  # T12: DAG parent for nested calls
     findings: tuple[Finding, ...]  # accumulated across all engines this request
     transport: str  # T7: transport type — set by adapter at session open
+    # T7 §3.2: MCP lifecycle handshake phase. Defaults to ACTIVE so the gate is
+    # inert for any session this worker did not see `initialize` for; the
+    # SessionEngine flips it to PENDING on `initialize` and back to ACTIVE on
+    # `notifications/initialized` (only when require_initialized_handshake is on).
+    handshake_phase: str = HANDSHAKE_ACTIVE
 
     @classmethod
     def new(cls, session_id: str, transport: str = "http") -> CoSAIContext:
@@ -52,6 +57,9 @@ class CoSAIContext:
 
     def with_audit_parent(self, parent_id: str) -> CoSAIContext:
         return replace(self, audit_parent_id=parent_id)
+
+    def with_handshake_phase(self, phase: str) -> CoSAIContext:
+        return replace(self, handshake_phase=phase)
 
 
 _ctx_var: ContextVar[CoSAIContext] = ContextVar("cosai_context")
