@@ -80,7 +80,7 @@ def _sync_seed_state(log_path: Path) -> tuple[int, str]:
     """Read existing log and return (count, prev_hash) without full verification."""
     count = 0
     prev = "0" * 64
-    if log_path.exists():
+    if log_path.exists() and log_path.is_file():
         with open(log_path) as f:
             for line in f:
                 line = line.strip()
