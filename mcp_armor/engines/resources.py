@@ -82,7 +82,7 @@ class ResourceEngine:
         self._session_budgets: OrderedDict[str, BudgetState] = OrderedDict()
         self._max_budget_entries = 50_000
         self._sessions_lock = threading.Lock()
-        self._reaper_task: asyncio.Task | None = None
+        self._reaper_task: asyncio.Task[None] | None = None
 
     async def on_startup(self) -> None:
         # Start the background zombie-session reaper.
@@ -203,7 +203,8 @@ class ResourceEngine:
             depth = _json_depth(args)
             if depth > self._max_arg_depth:
                 raise ResourceExceededError(
-                    f"Tool argument nesting depth {depth} exceeds limit {self._max_arg_depth} (T10-003)"
+                    f"Tool argument nesting depth {depth} exceeds limit "
+                    f"{self._max_arg_depth} (T10-003)"
                 )
 
         new_ctx = ctx.with_budget(budget.increment())

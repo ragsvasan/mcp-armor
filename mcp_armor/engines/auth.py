@@ -8,11 +8,14 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from ..context import CoSAIContext
 from ..exceptions import AuthenticationError
 from ..types import MCPRequest, MCPResponse
+
+if TYPE_CHECKING:
+    from joserfc.jwk import KeySetSerialization
 
 log = logging.getLogger(__name__)
 
@@ -110,20 +113,20 @@ def _b64url_encode(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
-def _parse_jwt_header(token: str) -> dict:
+def _parse_jwt_header(token: str) -> dict[str, Any]:
     """Decode the JWT header without signature verification."""
     parts = token.split(".")
     if len(parts) != 3:
         raise AuthenticationError("Malformed JWT: expected 3 dot-separated parts")
     try:
-        return json.loads(_b64url_decode(parts[0]))
+        return cast(dict[str, Any], json.loads(_b64url_decode(parts[0])))
     except Exception as exc:
         raise AuthenticationError("Cannot decode JWT header") from exc
 
 
-def _import_jwk(jwk_data: dict) -> Any:
+def _import_jwk(jwk_data: dict[str, Any]) -> Any:
     """Import a single JWK dict into a joserfc key object."""
-    from joserfc.jwk import ECKey, OctKey, RSAKey  # type: ignore[import]
+    from joserfc.jwk import ECKey, OctKey, RSAKey
 
     kty = jwk_data.get("kty")
     if kty == "EC":
@@ -135,7 +138,7 @@ def _import_jwk(jwk_data: dict) -> Any:
     raise AuthenticationError(f"Unsupported JWK kty: {kty!r}")
 
 
-def _jwk_thumbprint(jwk_data: dict) -> str:
+def _jwk_thumbprint(jwk_data: dict[str, Any]) -> str:
     """
     RFC 7638 JWK Thumbprint (SHA-256, base64url, no padding).
     Only required key members in lexicographic order, no spaces.
@@ -157,7 +160,7 @@ def _jwk_thumbprint(jwk_data: dict) -> str:
     return _b64url_encode(hashlib.sha256(body).digest())
 
 
-def _check_rsa_key_size(jwk_data: dict) -> None:
+def _check_rsa_key_size(jwk_data: dict[str, Any]) -> None:
     """Reject RSA keys below the minimum modulus size (NIST SP 800-131A)."""
     n_b64 = jwk_data.get("n", "")
     if not n_b64:
@@ -177,7 +180,7 @@ def _check_rsa_key_size(jwk_data: dict) -> None:
         )
 
 
-def _require_int_claim(claims: dict, key: str) -> None:
+def _require_int_claim(claims: dict[str, Any], key: str) -> None:
     val = claims.get(key)
     if val is not None and not isinstance(val, (int, float)):
         raise AuthenticationError(f"JWT {key!r} claim must be numeric, got {type(val).__name__!r}")
@@ -236,7 +239,7 @@ class AuthEngine:
         require_jti: bool = True,
         jti_cache_size: int = 10_000,
         token_expiry_max_secs: int = 3600,
-        jwks: dict | None = None,
+        jwks: dict[str, Any] | None = None,
         issuer: str | None = None,
         audience: str | None = None,
         dpop_max_age_secs: int = 30,
@@ -271,15 +274,15 @@ class AuthEngine:
             self._compute_access_token_algs(jwks) if jwks is not None else list(_DPOP_ALGS_LIST)
         )
 
-    def _load_keys(self, jwks: dict) -> Any:
-        from joserfc.jwk import KeySet  # type: ignore[import]
+    def _load_keys(self, jwks: dict[str, Any]) -> Any:
+        from joserfc.jwk import KeySet
 
         if "keys" in jwks:
-            return KeySet.import_key_set(jwks)
+            return KeySet.import_key_set(cast("KeySetSerialization", jwks))
         return _import_jwk(jwks)
 
     @staticmethod
-    def _compute_access_token_algs(jwks: dict) -> list[str]:
+    def _compute_access_token_algs(jwks: dict[str, Any]) -> list[str]:
         """
         Derive the access-token algorithm allowlist from the configured JWKS.
 
@@ -305,7 +308,7 @@ class AuthEngine:
     # Access-token verification
     # ------------------------------------------------------------------
 
-    def _verify_access_token(self, token: str) -> dict:
+    def _verify_access_token(self, token: str) -> dict[str, Any]:
         """Verify JWT signature and all standard claims. Fails closed."""
         if self._key_set is None:
             raise AuthenticationError(
@@ -314,12 +317,12 @@ class AuthEngine:
             )
 
         try:
-            from joserfc import jwt  # type: ignore[import]
+            from joserfc import jwt
 
             # F8 fix: pin the algorithm allowlist explicitly — do not trust
             # the library default.
             obj = jwt.decode(token, self._key_set, algorithms=self._access_token_algs)
-            claims: dict = obj.claims
+            claims: dict[str, Any] = obj.claims
         except AuthenticationError:
             raise
         except Exception as exc:
@@ -385,7 +388,7 @@ class AuthEngine:
         self,
         proof: str,
         access_token: str,
-        access_token_claims: dict,
+        access_token_claims: dict[str, Any],
         http_method: str,
     ) -> None:
         """
@@ -418,7 +421,7 @@ class AuthEngine:
 
         try:
             proof_key = _import_jwk(jwk_data)
-            from joserfc import jwt  # type: ignore[import]
+            from joserfc import jwt
 
             # F8 fix: pin to the asymmetric DPoP algorithm allowlist (already
             # validated against the header above; pinning here closes the
@@ -494,7 +497,7 @@ class AuthEngine:
     # Session binding (T1-003)
     # ------------------------------------------------------------------
 
-    def _check_session_binding(self, claims: dict, session_id: str) -> None:
+    def _check_session_binding(self, claims: dict[str, Any], session_id: str) -> None:
         """Enforce that a token with a sid/session_id claim matches the current session."""
         sid = claims.get("sid") or claims.get("session_id")
         if sid and sid != session_id:

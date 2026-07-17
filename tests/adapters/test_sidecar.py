@@ -120,9 +120,7 @@ class _RecordingUpstream:
         for k, v in self._extra:
             headers.append((k.encode("latin-1"), v.encode("latin-1")))
         headers.append((b"content-length", str(len(body)).encode()))
-        await send(
-            {"type": "http.response.start", "status": self._status, "headers": headers}
-        )
+        await send({"type": "http.response.start", "status": self._status, "headers": headers})
         await send({"type": "http.response.body", "body": body, "more_body": False})
 
 
@@ -389,9 +387,7 @@ async def test_regression_empty_body_rejected() -> None:
     async with _client(app) as client:
         session_id = await _open_session(client)
         before = upstream.call_count
-        resp = await client.post(
-            "/", content=b"", headers={"mcp-session-id": session_id}
-        )
+        resp = await client.post("/", content=b"", headers={"mcp-session-id": session_id})
         assert resp.status_code == 400
         assert upstream.call_count == before
 
@@ -478,9 +474,7 @@ async def test_regression_upstream_session_id_not_forwarded_to_client() -> None:
 async def test_regression_upstream_response_crlf_header_stripped() -> None:
     """Defense FIX-4: a response header whose value carries CRLF must be dropped
     (HTTP response splitting defence)."""
-    upstream = _RecordingUpstream(
-        extra_response_headers=[("x-evil", "foo\r\nx-injected: bar")]
-    )
+    upstream = _RecordingUpstream(extra_response_headers=[("x-evil", "foo\r\nx-injected: bar")])
     guard = CoSAIGuard([SessionEngine()])
     app = _sidecar(guard, upstream_app=upstream)
     async with _client(app) as client:

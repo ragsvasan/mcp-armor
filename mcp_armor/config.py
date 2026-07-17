@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 log = logging.getLogger(__name__)
 
@@ -413,9 +413,7 @@ def load_config(path: str | Path) -> ArmorConfig:
     t7_raw = _t("T7")
     t7 = (
         T7Config(
-            require_initialized_handshake=bool(
-                t7_raw.get("require_initialized_handshake", False)
-            )
+            require_initialized_handshake=bool(t7_raw.get("require_initialized_handshake", False))
         )
         if t7_raw is not None
         else None

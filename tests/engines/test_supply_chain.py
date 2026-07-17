@@ -170,7 +170,6 @@ def test_ed25519_wrong_signature_denied() -> None:
         priv.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode()
     )
 
-    tool = {"name": "my_tool"}
     bad_sig = binascii.hexlify(b"\x00" * 64).decode()
 
     eng = SupplyChainEngine(

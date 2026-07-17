@@ -183,7 +183,7 @@ class AuthzEngine:
         destructive_token_ttl_seconds: int = 60,
         echo_confirm_token: bool = False,
     ) -> None:
-        self._policies: dict[str, ToolPolicy] = tool_policies or {}  # type: ignore[assignment]
+        self._policies: dict[str, ToolPolicy] = tool_policies or {}
         self._default_deny = default_deny
         # echo_confirm_token PARADOX — read before changing this default:
         #

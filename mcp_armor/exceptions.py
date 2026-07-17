@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from .types import Finding, ThreatCategory
 
 
@@ -130,7 +132,7 @@ _HTTP_STATUS: dict[int, int] = {
 }
 
 
-def to_jsonrpc_error(exc: CoSAIException) -> dict:
+def to_jsonrpc_error(exc: CoSAIException) -> dict[str, Any]:
     return {
         "code": exc.json_rpc_code,
         "message": str(exc),

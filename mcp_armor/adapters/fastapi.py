@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 Scope = dict[str, Any]
-Receive = Callable
-Send = Callable
+Receive = Callable[..., Any]
+Send = Callable[..., Any]
 
 # MCP spec §3.4 session header (ASGI lowercase)
 _SESSION_HEADER = b"mcp-session-id"
@@ -113,8 +113,7 @@ class ArmorMiddleware:
         from ..engines.session import SessionEngine
 
         self._handshake_enforced = any(
-            isinstance(e, SessionEngine) and e.require_initialized_handshake
-            for e in guard._engines
+            isinstance(e, SessionEngine) and e.require_initialized_handshake for e in guard._engines
         )
 
         # H1: which response-phase engines actually inspect response *content*
@@ -143,7 +142,7 @@ class ArmorMiddleware:
         for engine in guard._engines:
             if isinstance(engine, ResourceEngine):
 
-                def _evict(sid: str, _sessions: dict = self._active_sessions) -> None:
+                def _evict(sid: str, _sessions: dict[str, Any] = self._active_sessions) -> None:
                     _sessions.pop(sid, None)
 
                 engine._eviction_callback = _evict
@@ -170,13 +169,13 @@ class ArmorMiddleware:
     async def _handle_lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
         # Forward lifespan events to the wrapped app via queues so it can initialise
         # its own resources (e.g. httpx connection pool) before we report startup.
-        app_receive_q: asyncio.Queue[dict] = asyncio.Queue()
-        app_send_q: asyncio.Queue[dict] = asyncio.Queue()
+        app_receive_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        app_send_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
-        async def _app_receive() -> dict:
+        async def _app_receive() -> dict[str, Any]:
             return await app_receive_q.get()
 
-        async def _app_send(message: dict) -> None:
+        async def _app_send(message: dict[str, Any]) -> None:
             await app_send_q.put(message)
 
         # Fix 5: use get_running_loop() — get_event_loop() is deprecated in 3.10+
@@ -397,12 +396,12 @@ class ArmorMiddleware:
             # Buffer the entire upstream response before running the response-phase guard.
             # Nothing is sent to the client until all response engines pass — violations
             # replace the response with an opaque JSON-RPC error (P0 fix).
-            response_start_msg: dict | None = None
+            response_start_msg: dict[str, Any] | None = None
             response_body_parts: list[bytes] = []
             response_bytes = 0
             response_oversized = False
 
-            async def buffering_send(message: dict) -> None:
+            async def buffering_send(message: dict[str, Any]) -> None:
                 nonlocal response_start_msg, response_bytes, response_oversized
                 if message["type"] == "http.response.start":
                     # Always strip any upstream-set Mcp-Session-Id. Armor owns the
@@ -438,7 +437,7 @@ class ArmorMiddleware:
 
             body_iter = iter([{"type": "http.request", "body": raw_body, "more_body": False}])
 
-            async def replay_receive() -> dict:
+            async def replay_receive() -> dict[str, Any]:
                 try:
                     return next(body_iter)
                 except StopIteration:

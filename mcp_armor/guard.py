@@ -138,9 +138,7 @@ class CoSAIGuard:
 
         if cfg.t7 is not None:
             engines.append(
-                SessionEngine(
-                    require_initialized_handshake=cfg.t7.require_initialized_handshake
-                )
+                SessionEngine(require_initialized_handshake=cfg.t7.require_initialized_handshake)
             )
 
         if cfg.t8 is not None:
@@ -251,7 +249,7 @@ class CoSAIGuard:
     # Lifecycle
     # -------------------------------------------------------------------------
 
-    def register_tool_schemas(self, tools: list[dict]) -> None:
+    def register_tool_schemas(self, tools: list[dict[str, Any]]) -> None:
         """
         Register a tools/list result with all engines that need it at setup time.
 
@@ -358,8 +356,9 @@ class CoSAIGuard:
                             "violation_detail": str(exc),
                         },
                     )
-                except Exception:
-                    pass  # audit failure must not interfere with dry_run pass-through
+                except Exception as exc:
+                    # audit failure must not interfere with dry_run pass-through
+                    log.warning("dry-run audit write failed (non-fatal): %s", exc)
                 break
 
     def filter_tools_list(self, tool_names: list[str], ctx: CoSAIContext) -> list[str]:
@@ -414,7 +413,7 @@ class CoSAIGuard:
         pii_profile: str | None = None,
         required_scope: str | None = None,
         allow_unauthenticated: bool = False,
-    ) -> Callable:
+    ) -> Callable[..., Any]:
         """
         Per-tool decorator that applies a filtered engine subset around a single tool.
 
@@ -464,7 +463,7 @@ class CoSAIGuard:
                 PIIEngine(profile=pii_profile) if isinstance(e, PIIEngine) else e for e in active
             ]
 
-        def decorator(fn: Callable) -> Callable:
+        def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 from types import MappingProxyType

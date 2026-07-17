@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import AuditChainError
@@ -19,7 +20,8 @@ from ..types import MCPRequest, MCPResponse
 
 log = logging.getLogger("mcp_armor.audit")
 
-def _canonical(record: dict) -> bytes:
+
+def _canonical(record: dict[str, Any]) -> bytes:
     """Stable serialization of the WHOLE record (minus integrity fields) for
     the hash-chain / HMAC input.
 
@@ -75,14 +77,12 @@ def _compute_hwm_mac(key: bytes, count: int, head: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _sync_write_hwm(
-    hwm_path: Path, count: int, head: str, hmac_key: bytes | None = None
-) -> None:
+def _sync_write_hwm(hwm_path: Path, count: int, head: str, hmac_key: bytes | None = None) -> None:
     # Use a per-call unique tmp file name to prevent concurrent writers from
     # clobbering each other's tmp file before the atomic replace.
     import uuid as _uuid_mod
 
-    payload: dict = {"count": count, "head": head}
+    payload: dict[str, Any] = {"count": count, "head": head}
     # M1: sign the count/head anchor when a key is configured so a
     # truncate-and-rewrite of the sidecar cannot forge a lowered count. With no
     # key the sidecar stays unsigned (backward compatible with the pre-M1
@@ -94,7 +94,7 @@ def _sync_write_hwm(
     tmp.replace(hwm_path)  # atomic on POSIX
 
 
-def _sync_append_record(log_path: Path, record: dict) -> None:
+def _sync_append_record(log_path: Path, record: dict[str, Any]) -> None:
     with open(log_path, "a") as f:
         f.write(json.dumps(record) + "\n")
 
@@ -181,8 +181,7 @@ def _sync_verify_chain(
                 stored_chain_hash = entry["chain_hash"]
             except KeyError as exc:
                 raise AuditChainError(
-                    f"Audit record missing chain field {exc.args[0]!r} at line {lineno} "
-                    "— tampered"
+                    f"Audit record missing chain field {exc.args[0]!r} at line {lineno} — tampered"
                 ) from exc
             expected = hashlib.sha256(canonical).hexdigest()
             if stored_chain_hash != expected:
@@ -490,9 +489,7 @@ class AuditEngine:
         # Re-anchor the sidecar to the now-verified tail (signed with the
         # current key — this also completes a key rotation for the sidecar).
         if count:
-            await asyncio.to_thread(
-                _sync_write_hwm, self._hwm_path, count, prev, self._hmac_key
-            )
+            await asyncio.to_thread(_sync_write_hwm, self._hwm_path, count, prev, self._hmac_key)
 
     def _write_sync(self, event: str, ctx: CoSAIContext, method: str, params_digest: str) -> str:
         """
@@ -507,7 +504,7 @@ class AuditEngine:
         with self._lock:
             prev_hash = self._prev_hash
             seq = self._seq
-            record: dict = {
+            record: dict[str, Any] = {
                 "ts": time.time(),
                 "seq": seq,
                 "entry_id": entry_id,
@@ -540,8 +537,8 @@ class AuditEngine:
         ctx: CoSAIContext,
         method: str,
         params_digest: str,
-        extra: dict | None = None,
-    ) -> tuple[str, dict]:
+        extra: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any], int, str]:
         """
         Build and return (entry_id, record) under the lock.
         Does NOT perform I/O — the caller dispatches I/O via asyncio.to_thread.
@@ -551,7 +548,7 @@ class AuditEngine:
         with self._lock:
             prev_hash = self._prev_hash
             seq = self._seq
-            record: dict = {
+            record: dict[str, Any] = {
                 "ts": time.time(),
                 "seq": seq,
                 "entry_id": entry_id,
@@ -582,7 +579,7 @@ class AuditEngine:
         ctx: CoSAIContext,
         method: str,
         params_digest: str,
-        extra: dict | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> str:
         """Build the record and persist it atomically under the async lock.
 

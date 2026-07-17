@@ -7,7 +7,7 @@ import html
 import itertools
 import re
 import unicodedata
-from typing import Any
+from typing import Any, cast
 
 from ..context import CoSAIContext
 from ..exceptions import InjectionDetectedError
@@ -133,7 +133,7 @@ def _try_decode_base64_tokens(text: str) -> str | None:
                     decoded_parts.append(decoded_str[:budget])
                     budget = 0
                 break  # found a decodable form
-            except Exception:
+            except Exception:  # noqa: S112 — non-decodable candidate; try the next form (hot path)
                 continue
         if budget <= 0:
             break  # decoded surface budget exhausted
@@ -239,7 +239,7 @@ class BoundaryEngine:
 
             self._using_re2 = True
         except ImportError:
-            import re  # type: ignore[no-redef]
+            import re
 
             self._using_re2 = False
         return [re.compile(p) for p in _ALL_PATTERNS]
@@ -283,7 +283,7 @@ class BoundaryEngine:
             for source in sources:
                 for pattern in self._compiled:
                     if pattern.search(source):
-                        return pattern.pattern
+                        return cast(str, pattern.pattern)
             return None
 
         # No re2: bound each regex call to _MAX_SCAN_LEN chars but slide
@@ -293,7 +293,7 @@ class BoundaryEngine:
             for window in _scan_windows(source):
                 for pattern in self._compiled:
                     if pattern.search(window):
-                        return pattern.pattern
+                        return cast(str, pattern.pattern)
         return None
 
     def _scan_values(self, obj: Any) -> str | None:

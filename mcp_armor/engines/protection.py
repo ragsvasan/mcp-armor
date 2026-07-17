@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..context import CoSAIContext
 from ..exceptions import PIILeakError
 from ..types import MCPRequest, MCPResponse
+
+if TYPE_CHECKING:
+    import re
 
 
 class ProtectionEngine:
@@ -37,11 +42,11 @@ class ProtectionEngine:
         self._active = set(self._PROFILES.get(profile, self._PROFILES["pci"]))
         self._patterns = self._compile_patterns()
 
-    def _compile_patterns(self) -> dict[str, object]:
+    def _compile_patterns(self) -> dict[str, re.Pattern[str]]:
         try:
             import re2 as re
         except ImportError:
-            import re  # type: ignore[no-redef]
+            import re
 
         all_patterns = {
             "ssn": r"\b\d{3}-\d{2}-\d{4}\b",

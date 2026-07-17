@@ -49,8 +49,8 @@ from .adapters.fastapi import ArmorMiddleware
 log = logging.getLogger(__name__)
 
 Scope = dict[str, Any]
-Receive = Callable
-Send = Callable
+Receive = Callable[..., Any]
+Send = Callable[..., Any]
 
 # Default listen address — loopback only. The upstream and the sidecar are meant
 # to share a host (or pod); bind to 0.0.0.0 explicitly only when a load balancer
@@ -113,9 +113,7 @@ _SESSION_HEADER_STR = "mcp-session-id"
 # from the bytes we actually send. mcp-session-id is stripped because armor owns
 # the session namespace — a (possibly compromised) upstream must never be able to
 # set or rotate the client's session id mid-stream (T7 session-fixation / FM-5).
-_STRIP_RESPONSE_HEADERS = frozenset(
-    {"content-encoding", "content-length", _SESSION_HEADER_STR}
-)
+_STRIP_RESPONSE_HEADERS = frozenset({"content-encoding", "content-length", _SESSION_HEADER_STR})
 
 # Headers armor generates / owns that must NOT be forwarded to the upstream. The
 # upstream is a separate trust domain; armor's HMAC-signed session id is
@@ -218,7 +216,7 @@ class _NoCookieJar(http.cookiejar.CookieJar):
     nothing.)
     """
 
-    def set_cookie(self, cookie: http.cookiejar.Cookie) -> None:  # type: ignore[override]
+    def set_cookie(self, cookie: http.cookiejar.Cookie) -> None:
         pass
 
 
@@ -598,9 +596,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--max-response-bytes",
         type=int,
-        default=int(
-            os.environ.get("ARMOR_MAX_RESPONSE_BYTES", str(_DEFAULT_MAX_RESPONSE_BYTES))
-        ),
+        default=int(os.environ.get("ARMOR_MAX_RESPONSE_BYTES", str(_DEFAULT_MAX_RESPONSE_BYTES))),
         help=(
             "Maximum buffered upstream response size in bytes "
             f"(env: ARMOR_MAX_RESPONSE_BYTES; default: {_DEFAULT_MAX_RESPONSE_BYTES})."

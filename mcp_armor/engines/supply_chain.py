@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import unicodedata
+from typing import TYPE_CHECKING, Any
 
 from ..context import CoSAIContext
 from ..exceptions import SupplyChainError
 from ..types import MCPRequest, MCPResponse
+
+if TYPE_CHECKING:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ def _levenshtein(a: str, b: str) -> int:
     return prev[-1]
 
 
-def _load_ed25519_public_key(pem_or_b64: str):  # type: ignore[return]
+def _load_ed25519_public_key(pem_or_b64: str) -> Ed25519PublicKey:
     """Load an Ed25519 public key from PEM or raw base64-encoded bytes."""
     import base64
 
@@ -132,7 +136,7 @@ class SupplyChainEngine:
                     f"{dist} of allowlisted '{allowed}' — typosquatting attack (T11-002)"
                 )
 
-    def _verify_signature(self, tool: dict, signature_hex: str) -> None:
+    def _verify_signature(self, tool: dict[str, Any], signature_hex: str) -> None:
         """
         Verify that the tool definition was signed with the registry's Ed25519 key.
 
@@ -168,7 +172,7 @@ class SupplyChainEngine:
                 f"Tool '{name}' registry signature invalid or missing (T11-003)"
             ) from exc
 
-    def validate_tools(self, tools: list[dict]) -> None:
+    def validate_tools(self, tools: list[dict[str, Any]]) -> None:
         """
         Call from server startup with the tools/list response.
 

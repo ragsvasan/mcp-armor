@@ -113,9 +113,7 @@ async def test_regression_sidecar_strips_client_content_length() -> None:
     as this request and treat the remaining bytes as a smuggled second request.
     """
     upstream = _RecordingUpstream()
-    forwarder = ForwardingApp(
-        "http://upstream.test", transport=httpx.ASGITransport(app=upstream)
-    )
+    forwarder = ForwardingApp("http://upstream.test", transport=httpx.ASGITransport(app=upstream))
     body = json.dumps(
         {
             "jsonrpc": "2.0",
@@ -180,9 +178,7 @@ async def test_sidecar_forwards_authorization_by_default() -> None:
     transparent passthrough — the credential still reaches a co-trusted upstream.
     Guards against a future silent flip of the default to strip."""
     upstream = _RecordingUpstream()
-    forwarder = ForwardingApp(
-        "http://upstream.test", transport=httpx.ASGITransport(app=upstream)
-    )
+    forwarder = ForwardingApp("http://upstream.test", transport=httpx.ASGITransport(app=upstream))
     body = b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}'
     scope = _scope([(b"authorization", b"Bearer super-secret-jwt")])
     await _drive(forwarder, scope, body)
@@ -202,14 +198,11 @@ def test_sidecar_warns_when_path_prefix_unset(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="mcp_armor.sidecar"):
         ForwardingApp("http://upstream.test")
     assert any(
-        "allowed_path_prefix not configured" in r.getMessage()
-        and "NOT enforced" in r.getMessage()
+        "allowed_path_prefix not configured" in r.getMessage() and "NOT enforced" in r.getMessage()
         for r in caplog.records
     )
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="mcp_armor.sidecar"):
         ForwardingApp("http://upstream.test", allowed_path_prefix="/api/mcp")
-    assert not any(
-        "allowed_path_prefix not configured" in r.getMessage() for r in caplog.records
-    )
+    assert not any("allowed_path_prefix not configured" in r.getMessage() for r in caplog.records)

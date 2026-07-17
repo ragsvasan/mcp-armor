@@ -135,7 +135,7 @@ async def test_open_session_calls_on_session_start() -> None:
     from tests.conftest import make_ctx
 
     ctx = make_ctx()
-    result = await guard.open_session(ctx)
+    await guard.open_session(ctx)
     assert ctx.session_id in opened
 
 
@@ -335,7 +335,8 @@ async def test_protect_pii_profile_override_catches_email() -> None:
 
 
 async def test_protect_pci_profile_does_not_block_email() -> None:
-    """Baseline: pci profile does not flag email — confirms the override test above is meaningful."""
+    """Baseline: pci profile does not flag email — confirms the override test above
+    is meaningful."""
     from mcp_armor.engines.protection import ProtectionEngine as PIIEngine
 
     guard = CoSAIGuard([PIIEngine(profile="pci")])

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import ValidationError
@@ -59,11 +60,11 @@ _SQL_PATTERNS: tuple[str, ...] = (
 )
 
 
-def _compile(patterns: tuple[str, ...]) -> list:
+def _compile(patterns: tuple[str, ...]) -> list[Any]:
     try:
         import re2 as re
     except ImportError:
-        import re  # type: ignore[no-redef]
+        import re
     return [re.compile(p) for p in patterns]
 
 
@@ -86,7 +87,7 @@ class ValidationEngine:
     ) -> None:
         self._max_payload_bytes = max_payload_bytes
         self._strict_schema = strict_schema
-        self._tool_schemas: dict[str, dict] = {}
+        self._tool_schemas: dict[str, dict[str, Any]] = {}
         # Guards _tool_schemas — on_response auto-registration can run on multiple
         # concurrent asyncio tasks (one per session); the lock keeps registration
         # from interleaving partial writes.
@@ -95,7 +96,7 @@ class ValidationEngine:
         self._path = _compile(_PATH_PATTERNS)
         self._sql = _compile(_SQL_PATTERNS)
 
-    def register_tools(self, tools: list[dict]) -> None:
+    def register_tools(self, tools: list[dict[str, Any]]) -> None:
         """Populate tool input schemas from a tools/list result.
 
         First-write-wins per tool name: the FIRST observed manifest is the trusted
@@ -140,7 +141,7 @@ class ValidationEngine:
             for k, v in value.items():
                 self._scan_all_strings(v, f"{field}.{k}")
 
-    def _validate_schema(self, arguments: object, schema: dict, tool_name: str) -> None:
+    def _validate_schema(self, arguments: object, schema: dict[str, Any], tool_name: str) -> None:
         try:
             import jsonschema
         except ImportError as exc:

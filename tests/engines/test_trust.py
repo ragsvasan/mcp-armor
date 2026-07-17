@@ -114,7 +114,7 @@ async def test_hooks_are_passthroughs():
     engine = TrustEngine()
     ctx = make_ctx()
     req = make_request()
-    resp = make_response()
+    _resp = make_response()
 
     assert await engine.on_session_start(ctx) is ctx
     assert await engine.on_request(ctx, req) is ctx
@@ -151,7 +151,8 @@ async def test_regression_on_response_passes_clean_response() -> None:
 
 @pytest.mark.asyncio
 async def test_regression_on_response_disabled_skips_scan() -> None:
-    """P1: on_response with strip_injection_patterns=False must not raise even for injection text."""
+    """P1: on_response with strip_injection_patterns=False must not raise even for
+    injection text."""
     from tests.conftest import make_ctx, make_response
 
     engine = TrustEngine(strip_injection_patterns=False)

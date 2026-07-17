@@ -18,14 +18,14 @@ from typing import Any
 BIDI_CHARS_RE = re.compile("[‪-‮⁦-⁩]")
 
 
-class Severity(str, Enum):
+class Severity(str, Enum):  # noqa: UP042 — (str, Enum) kept for wire/format compat, not StrEnum
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
 
 
-class ThreatCategory(str, Enum):
+class ThreatCategory(str, Enum):  # noqa: UP042 — (str, Enum) kept for wire/format compat, not StrEnum
     T1 = "T1"
     T2 = "T2"
     T3 = "T3"

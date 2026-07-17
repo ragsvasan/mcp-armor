@@ -126,13 +126,13 @@ def test_ssrf_disabled_does_not_overblock_unresolvable_host():
 @pytest.mark.parametrize(
     "encoding",
     [
-        "2130706433",    # decimal 127.0.0.1
+        "2130706433",  # decimal 127.0.0.1
         "017700000001",  # octal   127.0.0.1
-        "0x7f000001",    # hex     127.0.0.1
-        "127.1",         # short   127.0.0.1 (1 fills the low 3 octets)
-        "127.0.1",       # short   127.0.0.1 (1 fills the low 2 octets)
-        "167772161",     # decimal 10.0.0.1  (RFC1918)
-        "0xA000001",     # hex     10.0.0.1  (RFC1918)
+        "0x7f000001",  # hex     127.0.0.1
+        "127.1",  # short   127.0.0.1 (1 fills the low 3 octets)
+        "127.0.1",  # short   127.0.0.1 (1 fills the low 2 octets)
+        "167772161",  # decimal 10.0.0.1  (RFC1918)
+        "0xA000001",  # hex     10.0.0.1  (RFC1918)
     ],
 )
 def test_regression_ssrf_blocks_numeric_ipv4_encodings(encoding):
@@ -153,7 +153,7 @@ def test_regression_ssrf_blocks_numeric_ipv4_encodings(encoding):
 @pytest.mark.parametrize(
     "encoding",
     [
-        "134744072",   # decimal 8.8.8.8 (public)
+        "134744072",  # decimal 8.8.8.8 (public)
         "0x08080808",  # hex     8.8.8.8 (public)
     ],
 )

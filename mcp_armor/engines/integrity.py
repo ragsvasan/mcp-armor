@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import unicodedata
+from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import IntegrityError
@@ -46,7 +47,7 @@ class IntegrityEngine:
         self._typosquat_distance = typosquat_distance
 
     @staticmethod
-    def _manifest_hash(tools: list[dict]) -> str:
+    def _manifest_hash(tools: list[dict[str, Any]]) -> str:
         canonical = json.dumps(sorted(tools, key=lambda t: t.get("name", "")), sort_keys=True)
         return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -112,7 +113,7 @@ class IntegrityEngine:
                     ),
                 )
 
-    def _check_homoglyph_shadowing(self, tools: list[dict]) -> None:
+    def _check_homoglyph_shadowing(self, tools: list[dict[str, Any]]) -> None:
         """
         Detect two tools whose NFKC-normalized names collide (tool shadowing).
 
@@ -157,7 +158,7 @@ class IntegrityEngine:
                 ctx = self.check_drift(ctx, tools)
         return ctx
 
-    def scan_tool_manifest(self, tools: list[dict]) -> list[Finding]:
+    def scan_tool_manifest(self, tools: list[dict[str, Any]]) -> list[Finding]:
         """
         Scan a tools/list response for integrity issues.
 
@@ -175,7 +176,7 @@ class IntegrityEngine:
             self._check_typosquat(name)
         return []
 
-    def check_drift(self, ctx: CoSAIContext, current_tools: list[dict]) -> CoSAIContext:
+    def check_drift(self, ctx: CoSAIContext, current_tools: list[dict[str, Any]]) -> CoSAIContext:
         """
         Compare the current tools manifest hash against the session baseline.
 

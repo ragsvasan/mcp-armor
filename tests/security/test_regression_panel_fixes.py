@@ -34,9 +34,7 @@ from mcp_armor.types import MCPRequest
 
 
 def _client(app: ArmorMiddleware) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-    )
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
 
 
 def _payload(method: str, params=None, req_id: int = 1) -> dict:
