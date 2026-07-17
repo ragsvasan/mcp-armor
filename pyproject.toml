@@ -30,7 +30,7 @@ dependencies = [
     "keyring>=24.0,<26",
     "pyyaml>=6.0,<7",
     "jsonschema>=4.20,<5",
-    "cryptography>=41.0,<46",
+    "cryptography>=48.0.1,<49",  # C1 + GHSA-537c-gmf6-5ccf: floor at the patched wheel (vulnerable bundled OpenSSL fixed in 48.0.1), cap next major
 ]
 
 [project.optional-dependencies]
