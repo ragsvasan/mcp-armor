@@ -72,6 +72,11 @@ class TrustEngine:
         text = "".join(cleaned)
 
         if self._strip_injections:
+            # Delegates to BoundaryEngine._scan, which scans the FULL text with
+            # no length cap when re2 is loaded, or in overlapping windows across
+            # the full text otherwise — see boundary.py for the LOW fix closing
+            # the offset-8192 detection gap that applies here too (B1: this is
+            # the same _scan() the on_response path below calls).
             matched = self._boundary._scan(text)
             if matched:
                 raise TrustBoundaryViolation(

@@ -110,14 +110,16 @@ def test_public_ip_not_ssrf_target() -> None:
         assert eng.is_ssrf_target("dns.google") is False
 
 
-def test_dns_error_returns_false_not_raises() -> None:
+def test_dns_error_fails_closed() -> None:
+    """M3: an unresolvable host fails CLOSED — treated as an SSRF target rather
+    than allowed through (split-horizon DNS / rebinding could still reach it)."""
     eng = _engine()
     import socket
 
     with patch(
         "mcp_armor.engines.network.socket.getaddrinfo", side_effect=socket.gaierror("nxdomain")
     ):
-        assert eng.is_ssrf_target("nonexistent.invalid") is False
+        assert eng.is_ssrf_target("nonexistent.invalid") is True
 
 
 # F3 regression: an internal name that resolves to BOTH a public A record
@@ -236,7 +238,7 @@ async def test_regression_on_request_allows_public_url() -> None:
         method="tools/call",
         params={"name": "fetch", "arguments": {"url": "https://api.example.com/data"}},
     )
-    with patch("mcp_armor.engines.network.socket.gethostbyname", return_value="93.184.216.34"):
+    with patch("mcp_armor.engines.network.socket.getaddrinfo", return_value=_gai("93.184.216.34")):
         result = await eng.on_request(ctx, req)
     assert result is ctx
 

@@ -25,6 +25,51 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
 
 ## [Unreleased]
 
+### Security — fixed (2026-07-17 three-layer audit remediation)
+
+Three-layer review (mechanical scanners + Opus 4.8 core audit + Fable 5 sidecar/crypto
+deep-dive), then a T1 defense/adversary/security-review + crypto/MCP-persona panel on
+the remediation itself. Full record: `docs/AUDIT_2026-07-17.md`.
+
+**HIGH**
+- **T5 egress scan/forward asymmetry** (`adapters/fastapi.py`, `types.py`). Response
+  scanning inspected `str(dict)[:65536]` (and a non-JSON body scanned as `{}`) while the
+  full raw body was forwarded — PII/secrets past 64 KB, or in a non-JSON body, bypassed
+  the fail-closed T5 egress block. Now scans the full body and fails closed on any
+  non-object/unparseable body when a response engine (or the `tools/list` scope filter)
+  is active.
+- **Sidecar request smuggling** (`sidecar.py`). The client `Content-Length` was not
+  stripped before the upstream hop, so a CL/TE desync could smuggle an uninspected second
+  request past every engine. `content-length` is now dropped and recomputed by httpx.
+- **Audit `extra`-field tamper** (`engines/audit.py`). `chain_hash`/`chain_hmac` covered
+  only fixed fields; `extra` (incl. `dry_run_violation` details) was persisted but
+  unauthenticated. Canonicalization now covers the whole record minus the integrity fields.
+
+**MEDIUM**
+- Audit high-water-mark sidecar is now HMAC-signed — trailing-truncation is detected even
+  with the key set (the prior docstring's "requires the key" overclaimed).
+- `strict_schema` fails closed at startup if `jsonschema` is unavailable (was a silent
+  skip); SSRF scan fails closed on resolution failure and normalizes numeric-IP encodings.
+- DPoP htu validation fails closed when `endpoint_uri` is unset (cross-endpoint replay);
+  the jti replay store is pluggable (in-memory default + multi-worker warning); HS*
+  access-token algs are dropped unless the JWKS is exclusively `oct` (RS/HS confusion +
+  the joserfc empty-key surface); opt-in `strip_upstream_auth` for the sidecar.
+
+**Panel-caught follow-ups (on the remediation itself)**
+- Reject non-object JSON-RPC params (fail closed) instead of coercing to `{}` — the
+  coercion reintroduced the scan/forward asymmetry on the request side.
+- Non-object `tools/list` responses fail closed (the scope filter would otherwise skip
+  and forward the raw, unfiltered tool list — an authz bypass).
+- The response size cap gets its own 10 MiB ceiling (was the 64 KB request cap, which
+  rejected legitimate tool results) and is enforced incrementally during buffering
+  (was checked post-buffer, after the OOM it claimed to prevent).
+- `_session_budgets` bounded as an LRU (mint-and-abandon paths never call `on_session_end`).
+
+**Dependencies** — `joserfc` floor raised to `>=1.6.8` (empty-key HMAC bypass
+PYSEC-2026-2528 + RFC7797 payload-size fix). The project's declared closure otherwise
+already resolves to fixed versions; the broader CVE list a bare `pip-audit` reported was
+stale shared-environment noise, not mcp-armor's dependency set.
+
 ### Security — hardened
 
 - **RFC 9449 §4.3 enforcement (T1): DPoP-bound tokens must carry `cnf.jkt`.**

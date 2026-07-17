@@ -50,6 +50,10 @@ def _engine(key=None, require_dpop=False, **kwargs):
     """Build a test AuthEngine with a real HMAC key (fail-closed default)."""
     if key is None:
         key = _hmac_key()
+    # M4: DPoP htu validation now fails closed when endpoint_uri is unset, so a
+    # properly-configured engine must carry the canonical MCP endpoint URI
+    # (matches the default _dpop_proof htu). Callers may override (including None).
+    kwargs.setdefault("endpoint_uri", "https://example.com/mcp")
     return AuthEngine(require_dpop=require_dpop, jwks=_hmac_jwks(key), **kwargs), key
 
 
@@ -92,7 +96,9 @@ def _dpop_proof(
     }
     if include_ath:
         claims["ath"] = ath_override or _ath(access_token)
-    pub_jwk = ec_key.as_dict() if embed_private else _public_jwk(ec_key)
+    # joserfc >=1.7 excludes the private "d" from as_dict() by default; pass
+    # private=True so embed_private actually exercises the auth.py "d"-in-header guard.
+    pub_jwk = ec_key.as_dict(private=True) if embed_private else _public_jwk(ec_key)
     return jose_jwt.encode(
         {"alg": "ES256", "typ": typ, "jwk": pub_jwk},
         claims,
@@ -565,7 +571,11 @@ async def test_regression_dpop_htu_mismatch_raises():
 async def test_regression_dpop_jkt_thumbprint_must_match_cnf():
     """Proof signed with key whose thumbprint differs from access-token cnf.jkt is rejected."""
     key = _hmac_key()
-    engine = AuthEngine(require_dpop=False, jwks=_hmac_jwks(key))
+    engine = AuthEngine(
+        require_dpop=False,
+        jwks=_hmac_jwks(key),
+        endpoint_uri="https://example.com/mcp",  # M4: htu validated → endpoint must be set
+    )
     ec_key_a = _ec_keypair()
     ec_key_b = _ec_keypair()  # attacker's key — different from cnf key
 
@@ -584,7 +594,11 @@ async def test_regression_dpop_jkt_thumbprint_must_match_cnf():
 @pytest.mark.asyncio
 async def test_dpop_jkt_matching_thumbprint_passes():
     key = _hmac_key()
-    engine = AuthEngine(require_dpop=False, jwks=_hmac_jwks(key))
+    engine = AuthEngine(
+        require_dpop=False,
+        jwks=_hmac_jwks(key),
+        endpoint_uri="https://example.com/mcp",  # M4: htu validated → endpoint must be set
+    )
     ec_key = _ec_keypair()
     pub = _public_jwk(ec_key)
     jkt = _jwk_thumbprint(pub)

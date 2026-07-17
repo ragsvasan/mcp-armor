@@ -5,35 +5,35 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Protocol
 
 from ..context import CoSAIContext
 from ..exceptions import AuthenticationError
 from ..types import MCPRequest, MCPResponse
+
+log = logging.getLogger(__name__)
 
 # Asymmetric-only algorithms allowed for DPoP (RFC 9449 §4.2)
 _DPOP_ALLOWED_ALGS = frozenset(
     {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
 )
 
-# F8 fix: explicit algorithm allowlist for access-token verification. Never
-# rely on the JWT library's default — pin it so a downgraded/regressed
-# joserfc cannot accept `alg:none`. `none` (and any unlisted alg) is rejected
-# by joserfc when an explicit allowlist is passed. HS/RS confusion is
-# additionally prevented by joserfc binding alg to key type, but pinning the
-# list closes the library-default gap. HS* is included because operators may
-# legitimately configure a symmetric `oct` JWKS; it is NEVER accepted against
-# an RSA/EC public key (joserfc key-type binding enforces that).
-_ACCESS_TOKEN_ALGS: list[str] = sorted(
-    _DPOP_ALLOWED_ALGS
-    | {
-        "HS256",
-        "HS384",
-        "HS512",
-    }
-)
+# Symmetric HMAC algorithms — permitted for access-token verification ONLY when
+# the configured JWKS is exclusively `oct` keys (see
+# AuthEngine._compute_access_token_algs). Allowing HS* while an asymmetric key is
+# present enables RS/HS algorithm-confusion (signing an HS256 token with an
+# RSA/EC *public* key as the HMAC secret) and needlessly exposes the joserfc
+# empty-`oct`-key HMAC surface on the asymmetric verification path.
+_HS_ALGS = frozenset({"HS256", "HS384", "HS512"})
+
+# F8 fix: explicit algorithm allowlists. Never rely on the JWT library's default
+# — pin them so a downgraded/regressed joserfc cannot accept `alg:none`. The
+# access-token allowlist is derived per-instance from the JWKS key types
+# (AuthEngine._compute_access_token_algs); HS* is added only for an
+# exclusively-`oct` JWKS. The DPoP list is always asymmetric-only.
 _DPOP_ALGS_LIST: list[str] = sorted(_DPOP_ALLOWED_ALGS)
 
 # Minimum RSA modulus bits (NIST SP 800-131A)
@@ -77,6 +77,28 @@ class _JTICache:
 
             self._entries[jti] = exp
             return True
+
+
+class JTIReplayStore(Protocol):
+    """
+    Pluggable replay store for DPoP proof ``jti`` values (M5).
+
+    One method: atomically test-and-set with a TTL. Implementations may back this
+    with any shared medium (e.g. Redis) so multi-worker / multi-node deployments
+    share a single replay view and a proof replayed to a different worker within
+    the ``iat`` window is still detected. The default in-process ``_JTICache``
+    satisfies this Protocol.
+    """
+
+    def check_and_add(self, jti: str, exp: float) -> bool:
+        """
+        Register ``jti`` with expiry ``exp`` (Unix seconds).
+
+        Return True if ``jti`` was previously unseen (added now). Return False if
+        ``jti`` was already present within its TTL (a replay). May raise
+        ``AuthenticationError`` if the store cannot safely accept the entry.
+        """
+        ...
 
 
 def _b64url_decode(s: str) -> bytes:
@@ -193,7 +215,19 @@ class AuthEngine:
         unbound access tokens under DPoP (not recommended — defeats the
         sender-constraint guarantee).
     endpoint_uri : str | None
-        The canonical URI of this MCP endpoint. Required when require_dpop=True.
+        The canonical URI of this MCP endpoint, used for DPoP ``htu`` binding.
+        Required when require_dpop=True. Because a DPoP proof may be presented
+        voluntarily even when require_dpop=False, any request carrying a DPoP
+        proof is rejected when this is unset (M4: ``htu`` cannot be validated, so
+        the engine fails closed rather than accept a possible cross-endpoint
+        replay).
+    dpop_jti_store : JTIReplayStore | None
+        Optional shared store for DPoP proof ``jti`` replay detection (M5). When
+        None (default) a per-process in-memory cache is used — correct for a
+        single worker, but multi-worker / multi-node deployments must inject a
+        shared store (e.g. a Redis-backed ``check_and_add`` with TTL) so a proof
+        replayed to a different worker is still detected. ``on_startup`` emits a
+        warning when the in-memory default is in use.
     """
 
     def __init__(
@@ -209,6 +243,7 @@ class AuthEngine:
         dpop_future_skew_secs: int = 5,
         endpoint_uri: str | None = None,
         require_cnf_binding: bool = True,
+        dpop_jti_store: JTIReplayStore | None = None,
     ) -> None:
         self._require_dpop = require_dpop
         self._require_cnf_binding = require_cnf_binding
@@ -220,8 +255,21 @@ class AuthEngine:
         self._dpop_future_skew_secs = dpop_future_skew_secs
         self._endpoint_uri = endpoint_uri
         self._jti_cache = _JTICache(jti_cache_size)
-        self._dpop_jti_cache = _JTICache(jti_cache_size)
+        # M5: the DPoP jti replay store is pluggable. Default to the per-process
+        # in-memory _JTICache (backward compatible); a multi-worker / multi-node
+        # deployment injects a shared store (Redis-backed check_and_add with a
+        # TTL) so a proof replayed to a different worker is still detected.
+        # on_startup warns when the in-memory default is in use.
+        self._dpop_jti_store_is_shared = dpop_jti_store is not None
+        self._dpop_jti_cache: JTIReplayStore = (
+            dpop_jti_store if dpop_jti_store is not None else _JTICache(jti_cache_size)
+        )
         self._key_set = self._load_keys(jwks) if jwks is not None else None
+        # HS/RS hardening: HS* is allowed for access tokens only when the JWKS is
+        # exclusively `oct` (see _compute_access_token_algs).
+        self._access_token_algs: list[str] = (
+            self._compute_access_token_algs(jwks) if jwks is not None else list(_DPOP_ALGS_LIST)
+        )
 
     def _load_keys(self, jwks: dict) -> Any:
         from joserfc.jwk import KeySet  # type: ignore[import]
@@ -229,6 +277,29 @@ class AuthEngine:
         if "keys" in jwks:
             return KeySet.import_key_set(jwks)
         return _import_jwk(jwks)
+
+    @staticmethod
+    def _compute_access_token_algs(jwks: dict) -> list[str]:
+        """
+        Derive the access-token algorithm allowlist from the configured JWKS.
+
+        HS256/384/512 are included ONLY when every key is a symmetric ``oct`` key.
+        The moment any asymmetric key (RSA/EC/OKP) is present, HS* is dropped so
+        an attacker cannot present an HS256 token verified against an asymmetric
+        *public* key (RS/HS confusion), and the joserfc empty-``oct``-key HMAC
+        surface is kept off the asymmetric path. Asymmetric algorithms are always
+        allowed; an empty or unknown-``kty`` JWKS yields the asymmetric-only list
+        (HS* dropped — fail safe).
+        """
+        if "keys" in jwks:
+            key_dicts = jwks.get("keys") or []
+        else:
+            key_dicts = [jwks]
+        ktys = {kd.get("kty") for kd in key_dicts if isinstance(kd, dict)}
+        algs = set(_DPOP_ALLOWED_ALGS)
+        if ktys == {"oct"}:
+            algs |= _HS_ALGS
+        return sorted(algs)
 
     # ------------------------------------------------------------------
     # Access-token verification
@@ -247,7 +318,7 @@ class AuthEngine:
 
             # F8 fix: pin the algorithm allowlist explicitly — do not trust
             # the library default.
-            obj = jwt.decode(token, self._key_set, algorithms=_ACCESS_TOKEN_ALGS)
+            obj = jwt.decode(token, self._key_set, algorithms=self._access_token_algs)
             claims: dict = obj.claims
         except AuthenticationError:
             raise
@@ -373,12 +444,23 @@ class AuthEngine:
                 f"DPoP proof iat too far in the future (max skew {self._dpop_future_skew_secs}s)"
             )
 
-        if self._endpoint_uri is not None:
-            htu = claims.get("htu", "")
-            if htu.rstrip("/") != self._endpoint_uri.rstrip("/"):
-                raise AuthenticationError(
-                    f"DPoP htu mismatch: got {htu!r}, expected {self._endpoint_uri!r}"
-                )
+        # M4: htu binding is mandatory. A voluntarily-presented proof
+        # (require_dpop=False, endpoint_uri unset) previously skipped this check,
+        # letting an intermediary replay a proof captured for another endpoint
+        # against this instance within the iat window (RFC 9449 §4.3 cross-
+        # endpoint replay). If endpoint_uri is not configured we cannot validate
+        # htu, so fail closed rather than silently accept.
+        if self._endpoint_uri is None:
+            raise AuthenticationError(
+                "DPoP proof presented but this endpoint's URI is not configured — "
+                "cannot validate the htu binding (RFC 9449 §4.3), so the proof may "
+                "be a cross-endpoint replay. Refusing. Set endpoint_uri on AuthEngine."
+            )
+        htu = claims.get("htu", "")
+        if htu.rstrip("/") != self._endpoint_uri.rstrip("/"):
+            raise AuthenticationError(
+                f"DPoP htu mismatch: got {htu!r}, expected {self._endpoint_uri!r}"
+            )
 
         htm = claims.get("htm", "")
         if htm.upper() != http_method.upper():
@@ -434,6 +516,20 @@ class AuthEngine:
             raise ValueError(
                 "AuthEngine: require_dpop=True requires endpoint_uri to be set "
                 "(needed for DPoP htu binding)."
+            )
+        # M5: the default DPoP jti replay store is per-process. Warn operators
+        # that multi-worker / multi-node deployments need a shared store, since a
+        # proof replayed to a different worker within the iat window would
+        # otherwise go undetected (RFC 9449 §11.1).
+        if not self._dpop_jti_store_is_shared:
+            log.warning(
+                "AuthEngine: DPoP jti replay cache is a per-process in-memory store. "
+                "Under multiple workers (uvicorn --workers N) or multiple nodes/pods a "
+                "captured DPoP proof replayed to a different worker within the iat "
+                "window is NOT detected (RFC 9449 §11.1). For multi-worker / multi-node "
+                "deployments inject a shared store via dpop_jti_store= (e.g. a "
+                "Redis-backed check_and_add with TTL=dpop_max_age_secs), implement an "
+                "RFC 9449 §8 server nonce, or pin the deployment to a single worker."
             )
 
     async def on_session_start(self, ctx: CoSAIContext) -> CoSAIContext:

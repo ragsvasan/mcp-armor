@@ -19,28 +19,28 @@ from ..types import MCPRequest, MCPResponse
 
 log = logging.getLogger("mcp_armor.audit")
 
-# Fields included in the chain hash — every auditable field except chain_hash itself.
-# F6 fix: `seq` (monotonic 0-based sequence number) is part of the hashed body so
-# the position of every record is cryptographically bound — a truncated prefix no
-# longer matches the recorded high-water mark.
-_CHAIN_FIELDS = (
-    "ts",
-    "seq",
-    "entry_id",
-    "parent_id",
-    "session_id",
-    "user_id",
-    "tenant_id",
-    "event",
-    "method",
-    "params_digest",
-    "prev_hash",
-)
-
-
 def _canonical(record: dict) -> bytes:
-    """Stable serialization of auditable fields for hash-chain input."""
-    body = {k: record[k] for k in _CHAIN_FIELDS}
+    """Stable serialization of the WHOLE record (minus integrity fields) for
+    the hash-chain / HMAC input.
+
+    H3 fix: the hash and HMAC must cover *every* persisted field, not a fixed
+    subset. This previously hashed only 11 named fields, so any ``extra`` key
+    written to disk — notably ``violation_class`` / ``violation_detail`` on a
+    ``dry_run_violation`` record — was persisted but unauthenticated. An
+    attacker with log-write access could rewrite those forensic fields (or flip
+    ``dry_run``, or inject misleading keys) while leaving ``chain_hash`` /
+    ``chain_hmac`` intact, and verification would still report the chain valid.
+
+    Hashing ``{k: v for k, v in record.items() if k not in (chain_hash,
+    chain_hmac)}`` closes that gap: at write time the record does not yet carry
+    the integrity fields, so the exclusion is a no-op; at verify time the parsed
+    record does carry them, so excluding exactly those two reproduces the
+    identical byte string. ``sort_keys`` makes key order irrelevant across the
+    JSON round-trip, and compact separators keep the encoding canonical. ``seq``
+    (F6) remains part of the body, so record position stays cryptographically
+    bound and a truncated prefix still fails the high-water-mark check.
+    """
+    body = {k: v for k, v in record.items() if k not in ("chain_hash", "chain_hmac")}
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -56,18 +56,41 @@ def _compute_chain_hmac(key: bytes, canonical_bytes: bytes) -> str:
     return _hmac.new(key, canonical_bytes, hashlib.sha256).hexdigest()
 
 
+def _compute_hwm_mac(key: bytes, count: int, head: str) -> str:
+    """MAC over the high-water-mark anchor (record count + head chain hash).
+
+    M1 fix: the ``.hwm`` sidecar is the *only* anchor for the total record
+    count. Left unsigned, an attacker with audit-dir write access can delete
+    trailing records and rewrite the sidecar's ``{count, head}`` to match the
+    shortened log — every surviving record's ``chain_hmac`` stays valid, so
+    verification passes and the truncation is undetectable even with the key
+    set. Binding ``count`` + ``head`` under the audit key makes a lowered count
+    unforgeable without the key.
+    """
+    return _hmac.new(key, f"{count}.{head}".encode(), hashlib.sha256).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Sync I/O helpers — called via asyncio.to_thread to avoid blocking the loop
 # ---------------------------------------------------------------------------
 
 
-def _sync_write_hwm(hwm_path: Path, count: int, head: str) -> None:
+def _sync_write_hwm(
+    hwm_path: Path, count: int, head: str, hmac_key: bytes | None = None
+) -> None:
     # Use a per-call unique tmp file name to prevent concurrent writers from
     # clobbering each other's tmp file before the atomic replace.
     import uuid as _uuid_mod
 
+    payload: dict = {"count": count, "head": head}
+    # M1: sign the count/head anchor when a key is configured so a
+    # truncate-and-rewrite of the sidecar cannot forge a lowered count. With no
+    # key the sidecar stays unsigned (backward compatible with the pre-M1
+    # on-disk format and the dev/unsigned profile).
+    if hmac_key is not None:
+        payload["mac"] = _compute_hwm_mac(hmac_key, count, head)
     tmp = Path(str(hwm_path) + f".{_uuid_mod.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps({"count": count, "head": head}))
+    tmp.write_text(json.dumps(payload))
     tmp.replace(hwm_path)  # atomic on POSIX
 
 
@@ -82,12 +105,23 @@ def _sync_seed_state(log_path: Path) -> tuple[int, str]:
     prev = "0" * 64
     if log_path.exists() and log_path.is_file():
         with open(log_path) as f:
-            for line in f:
+            for lineno, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                entry = json.loads(line)
-                prev = entry["chain_hash"]
+                # LOW: mirror _sync_verify_chain — a malformed/truncated line or a
+                # record missing chain_hash must fail closed as a classified
+                # AuditChainError, not a bare JSONDecodeError/KeyError (which, on
+                # the verify_on_startup=False path, would surface as an unclassified
+                # crash instead of a tamper alarm).
+                try:
+                    entry = json.loads(line)
+                    prev = entry["chain_hash"]
+                except (json.JSONDecodeError, KeyError) as exc:
+                    raise AuditChainError(
+                        f"Audit log malformed at line {lineno} during seed-state "
+                        "read — cannot establish the chain head"
+                    ) from exc
                 count += 1
     return count, prev
 
@@ -138,9 +172,20 @@ def _sync_verify_chain(
                 )
             if entry.get("prev_hash") != prev:
                 raise AuditChainError(f"Audit chain prev_hash mismatch at line {lineno} — tampered")
-            canonical = _canonical(entry)
+            # LOW: a record missing a structural chain field (deleted/renamed)
+            # must surface as a classified AuditChainError, not a bare KeyError.
+            # _canonical no longer indexes a fixed field set (H3), so the direct
+            # chain_hash read is the remaining KeyError surface — wrap both.
+            try:
+                canonical = _canonical(entry)
+                stored_chain_hash = entry["chain_hash"]
+            except KeyError as exc:
+                raise AuditChainError(
+                    f"Audit record missing chain field {exc.args[0]!r} at line {lineno} "
+                    "— tampered"
+                ) from exc
             expected = hashlib.sha256(canonical).hexdigest()
-            if entry.get("chain_hash") != expected:
+            if stored_chain_hash != expected:
                 raise AuditChainError(
                     f"Audit chain broken at line {lineno} — log may have been tampered"
                 )
@@ -174,11 +219,12 @@ def _sync_verify_chain(
                             f"Audit chain HMAC mismatch at line {lineno} — "
                             "log was rewritten or HMAC key changed"
                         )
-            prev = entry["chain_hash"]
+            prev = stored_chain_hash
             count += 1
 
-    # High-water-mark enforcement (same logic as before)
-    hwm = _sync_read_hwm(hwm_path)
+    # High-water-mark enforcement (same logic as before). M1: verify the
+    # sidecar MAC with the same key(s) used for the per-record chain_hmac.
+    hwm = _sync_read_hwm(hwm_path, hmac_key, hmac_key_prev)
     if hwm is None:
         if count > 0:
             raise AuditChainError(
@@ -201,18 +247,54 @@ def _sync_verify_chain(
     return count, prev
 
 
-def _sync_read_hwm(hwm_path: Path) -> tuple[int, str] | None:
-    """Return (count, head_chain_hash) from the sidecar, or None if absent."""
+def _sync_read_hwm(
+    hwm_path: Path,
+    hmac_key: bytes | None = None,
+    hmac_key_prev: bytes | None = None,
+) -> tuple[int, str] | None:
+    """Return (count, head_chain_hash) from the sidecar, or None if absent.
+
+    M1: when an HMAC key is configured the sidecar MUST carry a valid ``mac``
+    over ``f"{count}.{head}"``. A *missing* mac is treated as tamper — an
+    attacker who rewrites the sidecar to hide a truncation would simply omit it,
+    and an unsigned sidecar under a keyed deployment cannot prove the count — and
+    a *mismatched* mac is tamper. ``hmac_key_prev`` is accepted during a rotation
+    grace period, mirroring the per-record ``chain_hmac`` logic; the caller
+    re-anchors with the current key after a successful verify. With no key the
+    sidecar is read as before (backward compatible).
+    """
     if not hwm_path.exists():
         return None
     try:
         data = json.loads(hwm_path.read_text())
-        return int(data["count"]), str(data["head"])
+        count = int(data["count"])
+        head = str(data["head"])
     except (json.JSONDecodeError, KeyError, ValueError, OSError) as exc:
         raise AuditChainError(
             "Audit high-water-mark sidecar is unreadable or malformed — "
             "cannot prove the log has not been rolled back"
         ) from exc
+    if hmac_key is not None:
+        stored_mac = data.get("mac")
+        if stored_mac is None:
+            raise AuditChainError(
+                "Audit high-water-mark sidecar has no MAC while "
+                "ARMOR_AUDIT_HMAC_KEY is set — the count anchor is unsigned, so a "
+                "truncated log could be masked by rewriting the sidecar; an "
+                "unsigned sidecar is rejected (T12-002). Regenerate a signed "
+                "sidecar from the trusted log to migrate a pre-signing deployment."
+            )
+        candidates = [hmac_key] + ([hmac_key_prev] if hmac_key_prev is not None else [])
+        if not any(
+            _hmac.compare_digest(str(stored_mac), _compute_hwm_mac(k, count, head))
+            for k in candidates
+        ):
+            raise AuditChainError(
+                "Audit high-water-mark sidecar MAC mismatch — the recorded "
+                "count/head was rewritten without the audit key (truncation / "
+                "rollback attempt, T12-002)"
+            )
+    return count, head
 
 
 class AuditEngine:
@@ -227,6 +309,15 @@ class AuditEngine:
     environment to add an unforgeable ``chain_hmac`` field to every record.
     Without the key, the chain can be truncated-and-recalculated by anyone
     with write access to the log file; with the key, doing so requires the key.
+
+    Integrity coverage:
+    - H3: ``chain_hash`` / ``chain_hmac`` cover the WHOLE record (minus the
+      integrity fields themselves), so ``extra`` keys such as a violation's
+      ``violation_class`` / ``violation_detail`` cannot be rewritten undetected.
+    - M1: the ``.hwm`` high-water-mark sidecar (the total-count anchor) is also
+      MAC'd with the key, so trailing-record truncation cannot be masked by
+      rewriting ``{count, head}``. A sidecar missing its MAC while a key is set
+      is treated as tamper.
 
     Covers:
     - T12-001: No execution trace (cannot reconstruct agent decision chain)
@@ -382,7 +473,7 @@ class AuditEngine:
             self._seq = count
             self._prev_hash = prev
         if count:
-            _sync_write_hwm(self._hwm_path, count, prev)
+            _sync_write_hwm(self._hwm_path, count, prev, self._hmac_key)
 
     async def _verify_chain_async(self) -> None:
         """Async entry point for chain verification — runs sync logic off-thread."""
@@ -396,9 +487,12 @@ class AuditEngine:
         with self._lock:
             self._seq = count
             self._prev_hash = prev
-        # Re-anchor the sidecar to the now-verified tail.
+        # Re-anchor the sidecar to the now-verified tail (signed with the
+        # current key — this also completes a key rotation for the sidecar).
         if count:
-            await asyncio.to_thread(_sync_write_hwm, self._hwm_path, count, prev)
+            await asyncio.to_thread(
+                _sync_write_hwm, self._hwm_path, count, prev, self._hmac_key
+            )
 
     def _write_sync(self, event: str, ctx: CoSAIContext, method: str, params_digest: str) -> str:
         """
@@ -437,7 +531,7 @@ class AuditEngine:
             self._seq = seq + 1
             new_seq = self._seq
         # HWM write is outside the lock (contention-sensitive, non-blocking)
-        _sync_write_hwm(self._hwm_path, new_seq, chain_hash)
+        _sync_write_hwm(self._hwm_path, new_seq, chain_hash, hmac_key)
         return entry_id
 
     def _write(
@@ -509,7 +603,9 @@ class AuditEngine:
             )
             await asyncio.to_thread(_sync_append_record, self._path, record)
             # Advance HWM off-thread; don't block the loop
-            await asyncio.to_thread(_sync_write_hwm, self._hwm_path, new_seq, chain_hash)
+            await asyncio.to_thread(
+                _sync_write_hwm, self._hwm_path, new_seq, chain_hash, self._hmac_key
+            )
         return entry_id
 
     async def on_session_start(self, ctx: CoSAIContext) -> CoSAIContext:

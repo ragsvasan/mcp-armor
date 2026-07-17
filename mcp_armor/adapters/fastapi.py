@@ -78,11 +78,18 @@ class ArmorMiddleware:
         app: Any,
         guard: CoSAIGuard,
         max_body_bytes: int = _DEFAULT_MAX_BODY,
+        max_response_bytes: int = 10 * 1024 * 1024,
         cors_origins: list[str] | None = None,
     ) -> None:
         self._app = app
         self._guard = guard
         self._max_body_bytes = max_body_bytes
+        # H1: response bodies get their OWN (larger) ceiling. The request cap
+        # (_max_body_bytes, ~64KB) is far too small for legitimate JSON-RPC tool
+        # results (routinely multi-MB); reusing it here would reject real
+        # responses. Enforced incrementally during buffering (below) so an
+        # oversized upstream still cannot OOM the worker.
+        self._max_response_bytes = max_response_bytes
         # CORS allowlist — None means "no CORS validation configured" (emits startup warning).
         # Set to a list of permitted origins to enforce; wildcard ("*") is never permitted.
         self._cors_origins: frozenset[str] | None = (
@@ -109,6 +116,25 @@ class ArmorMiddleware:
             isinstance(e, SessionEngine) and e.require_initialized_handshake
             for e in guard._engines
         )
+
+        # H1: which response-phase engines actually inspect response *content*
+        # (scan_body)? A non-JSON / unparseable upstream body cannot be scanned,
+        # so when any of these is active the response path must fail CLOSED rather
+        # than forward the raw bytes unscanned (the T4/T5/T9 egress bypass).
+        from ..engines.boundary import BoundaryEngine
+        from ..engines.protection import ProtectionEngine
+        from ..engines.trust import TrustEngine
+
+        def _scans_response_content(engine: Any) -> bool:
+            if isinstance(engine, ProtectionEngine):
+                return True  # T5 always scans response content
+            if isinstance(engine, BoundaryEngine):
+                return bool(getattr(engine, "_scan_responses", False))
+            if isinstance(engine, TrustEngine):
+                return bool(getattr(engine, "_strip_injections", False))
+            return False
+
+        self._response_scan_active = any(_scans_response_content(e) for e in guard._engines)
 
         # Fix 9: wire the ResourceEngine eviction callback so reaped sessions
         # are also removed from _active_sessions (prevents memory leak).
@@ -373,9 +399,11 @@ class ArmorMiddleware:
             # replace the response with an opaque JSON-RPC error (P0 fix).
             response_start_msg: dict | None = None
             response_body_parts: list[bytes] = []
+            response_bytes = 0
+            response_oversized = False
 
             async def buffering_send(message: dict) -> None:
-                nonlocal response_start_msg
+                nonlocal response_start_msg, response_bytes, response_oversized
                 if message["type"] == "http.response.start":
                     # Always strip any upstream-set Mcp-Session-Id. Armor owns the
                     # session namespace: on initialize it substitutes its own
@@ -393,7 +421,19 @@ class ArmorMiddleware:
                     message = {**message, "headers": headers}
                     response_start_msg = message
                 elif message["type"] == "http.response.body":
-                    response_body_parts.append(message.get("body", b""))
+                    if response_oversized:
+                        return  # cap already tripped — discard further chunks
+                    chunk = message.get("body", b"")
+                    response_bytes += len(chunk)
+                    if response_bytes > self._max_response_bytes:
+                        # H1: enforce the response ceiling INCREMENTALLY so an
+                        # oversized/slow upstream cannot OOM the worker by
+                        # buffering the whole body first. Drop what we have here;
+                        # the post-loop check returns the opaque error.
+                        response_oversized = True
+                        response_body_parts.clear()
+                        return
+                    response_body_parts.append(chunk)
                 # Do NOT forward to `send` here — buffer everything until guard passes.
 
             body_iter = iter([{"type": "http.request", "body": raw_body, "more_body": False}])
@@ -404,14 +444,62 @@ class ArmorMiddleware:
                 except StopIteration:
                     return {"type": "http.disconnect"}
 
-            await self._app(scope, replay_receive, buffering_send)
+            try:
+                await self._app(scope, replay_receive, buffering_send)
+            except Exception as exc:
+                # A failure inside the wrapped app during response buffering must
+                # surface as armor's opaque -32603, not propagate raw to the ASGI
+                # server (which could render a traceback to the client).
+                log.error("Unexpected upstream app error during buffering: %s", exc, exc_info=True)
+                await _send_error(send, request_id, -32603, "Internal error")
+                return
+
+            # H1: reject if the incremental response cap tripped during buffering
+            # (memory was already bounded there; this just returns the opaque error).
+            if response_oversized:
+                log.warning(
+                    "Upstream response body exceeded cap %d bytes — rejected",
+                    self._max_response_bytes,
+                )
+                await _send_error(send, request_id, -32603, "Internal error")
+                return
 
             # Run response-phase guard BEFORE committing response to client.
             resp_raw = b"".join(response_body_parts)
-            try:
-                resp_dict = json.loads(resp_raw) if resp_raw else {}
-            except json.JSONDecodeError:
-                resp_dict = {}
+
+            # H1: the T4/T5/T9 response scanners can only inspect a JSON object.
+            # A non-JSON / non-object body would otherwise be forwarded UNSCANNED
+            # (json.loads failure → resp_dict={} → scan sees "{}" clean → the full
+            # raw bytes egress). When any response-scanning engine is active, fail
+            # CLOSED on an unparseable / non-object body instead of passing clean.
+            if not resp_raw:
+                resp_dict: dict[str, Any] = {}
+            else:
+                try:
+                    parsed_resp: Any = json.loads(resp_raw)
+                except json.JSONDecodeError:
+                    parsed_resp = None
+                if isinstance(parsed_resp, dict):
+                    resp_dict = parsed_resp
+                elif self._response_scan_active or method == "tools/list":
+                    # Fail closed when the body needs inspection but isn't an object:
+                    # either a response-content scanner is active (T4/T5/T9 egress),
+                    # OR this is a tools/list that must be scope-filtered
+                    # (T2-004b) — the scope filter keys off resp_dict, so a
+                    # non-object body would otherwise skip filtering and forward the
+                    # raw, unfiltered tool list (authorization bypass).
+                    log.warning(
+                        "Upstream response is not a JSON object but requires "
+                        "inspection (response-content scanning active, or a "
+                        "tools/list needing scope filtering) — failing closed."
+                    )
+                    await _send_error(send, request_id, -32603, "Internal error")
+                    return
+                else:
+                    # No response-content scanners configured — preserve the
+                    # existing passthrough (and avoid a from_dict crash on a
+                    # valid-but-non-object JSON body).
+                    resp_dict = {}
             resp = MCPResponse.from_dict(resp_dict)
             try:
                 ctx = await self._guard._run_response(ctx, resp)

@@ -143,7 +143,19 @@ class ValidationEngine:
     def _validate_schema(self, arguments: object, schema: dict, tool_name: str) -> None:
         try:
             import jsonschema
-        except ImportError:
+        except ImportError as exc:
+            # M2: never silently skip validation when strict_schema is on.
+            # on_startup already fails closed for this case, so reaching here
+            # means jsonschema became unimportable AFTER a successful startup —
+            # still refuse to let the T3-005 schema gate degrade to a no-op.
+            if self._strict_schema:
+                from ..config import ConfigError
+
+                raise ConfigError(
+                    "strict_schema=True but the 'jsonschema' package is not "
+                    "importable at validation time — refusing to skip T3-005 "
+                    "schema enforcement."
+                ) from exc
             return
 
         if self._strict_schema:
@@ -157,7 +169,26 @@ class ValidationEngine:
             ) from exc
 
     async def on_startup(self) -> None:
-        pass
+        # M2: strict_schema enforcement (T3-005) depends on the optional
+        # `jsonschema` package. If it is absent, `_validate_schema` would skip
+        # ALL schema validation silently — a security downgrade the operator who
+        # set strict_schema=True never consented to (malformed/extra arguments a
+        # schema would reject would sail through every tools/call). Fail closed
+        # at startup so the misconfiguration surfaces before the server accepts
+        # any traffic, rather than degrading enforcement to a silent no-op.
+        if self._strict_schema:
+            try:
+                import jsonschema  # noqa: F401
+            except ImportError as exc:
+                from ..config import ConfigError
+
+                raise ConfigError(
+                    "strict_schema=True requires the optional 'jsonschema' "
+                    "package, but it is not importable. Install jsonschema or "
+                    "construct the ValidationEngine with strict_schema=False. "
+                    "Refusing to start with T3-005 schema validation silently "
+                    "disabled."
+                ) from exc
 
     async def on_session_start(self, ctx: CoSAIContext) -> CoSAIContext:
         return ctx

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import unicodedata
 
 from ..context import CoSAIContext
 from ..exceptions import IntegrityError
 from ..types import Finding, MCPRequest, MCPResponse, Severity, ThreatCategory
+
+log = logging.getLogger(__name__)
 
 
 def _nfkc(name: str) -> str:
@@ -151,7 +154,7 @@ class IntegrityEngine:
                 self.scan_tool_manifest(tools)
                 return ctx.with_manifest_hash(new_hash)
             else:
-                self.check_drift(ctx, tools)
+                ctx = self.check_drift(ctx, tools)
         return ctx
 
     def scan_tool_manifest(self, tools: list[dict]) -> list[Finding]:
@@ -172,20 +175,43 @@ class IntegrityEngine:
             self._check_typosquat(name)
         return []
 
-    def check_drift(self, ctx: CoSAIContext, current_tools: list[dict]) -> None:
+    def check_drift(self, ctx: CoSAIContext, current_tools: list[dict]) -> CoSAIContext:
         """
         Compare the current tools manifest hash against the session baseline.
 
         Call this after every `tools/list` re-fetch during an active session.
+
+        Returns the (possibly updated) context. LOW fix: when drift is
+        detected and fail_on_drift=False, this used to be completely silent —
+        no raise, no log, no Finding. An operator running with
+        fail_on_drift=False had no signal at all that a T6-001 rug-pull had
+        occurred. Now a warning is always logged and a Finding is attached to
+        ctx.findings, so drift stays observable even when this instance is
+        configured not to fail closed on it.
         """
         new_hash = self._manifest_hash(current_tools)
         if ctx.tool_manifest_hash and new_hash != ctx.tool_manifest_hash:
+            message = (
+                f"Tool manifest changed mid-session "
+                f"(was {ctx.tool_manifest_hash[:12]}…, now {new_hash[:12]}…) — "
+                "possible rug-pull attack (T6-001)"
+            )
             if self._fail_on_drift:
-                raise IntegrityError(
-                    f"Tool manifest changed mid-session "
-                    f"(was {ctx.tool_manifest_hash[:12]}…, now {new_hash[:12]}…) — "
-                    "possible rug-pull attack (T6-001)"
-                )
+                raise IntegrityError(message)
+            log.warning("IntegrityEngine: %s (fail_on_drift=False — not blocking)", message)
+            finding = Finding(
+                threat=ThreatCategory.T6,
+                severity=Severity.HIGH,
+                code="T6-001",
+                message=message,
+                location="tools/list (mid-session)",
+                remediation=(
+                    "Investigate the tool source for tampering, or set fail_on_drift=True "
+                    "to block mid-session manifest changes"
+                ),
+            )
+            return ctx.with_finding(finding)
+        return ctx
 
     async def on_session_end(self, ctx: CoSAIContext) -> None:
         pass

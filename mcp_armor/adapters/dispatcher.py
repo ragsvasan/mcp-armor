@@ -44,11 +44,14 @@ def wrap_dispatcher(dispatcher: Dispatcher, guard: CoSAIGuard) -> Dispatcher:
         # Using payload["id"] as session_id would allow session fixation (T7-001).
         # Stateless signed token (transport "rpc") so SessionEngine.verify() accepts it.
         session_id = guard.mint_session_id("rpc")
-        req = MCPRequest.from_dict(payload, session_id=session_id, headers={}, transport="rpc")
         ctx = CoSAIContext.new(session_id)
         set_context(ctx)
 
         try:
+            # from_dict may raise ValidationError (non-object params). Keep it
+            # INSIDE the try so a malformed request fails closed as a JSON-RPC
+            # error instead of crashing this un-wrapped transport.
+            req = MCPRequest.from_dict(payload, session_id=session_id, headers={}, transport="rpc")
             ctx = await guard._run_request(ctx, req)
             set_context(ctx)
             raw_resp = await dispatcher(payload)

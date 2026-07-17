@@ -154,6 +154,54 @@ class NetworkEngine:
             addr = addr.ipv4_mapped
         return any(addr in net for net in _BLOCKED_NETWORKS)
 
+    @staticmethod
+    def _normalize_numeric_ipv4(host: str) -> str | None:
+        """Convert an alternate numeric IPv4 encoding to canonical dotted-quad.
+
+        M3: `ipaddress.ip_address` accepts ONLY canonical dotted-quad, but
+        browsers, curl, and libc `inet_aton` also accept decimal
+        (``2130706433``), octal (``017700000001``), hex (``0x7f000001``), and
+        short forms (``127.1``, ``127.0.1``) — every one of which can encode
+        127.0.0.1 or another internal target. Left un-normalized these slip past
+        the ip-literal check here and, if the guard's resolver also rejects them,
+        past the DNS resolve, while a downstream fetcher's `inet_aton` happily
+        reaches the internal address. Returns the dotted-quad string, or None if
+        `host` is not a numeric IPv4 encoding (a real hostname, IPv6, etc.).
+        """
+        parts = host.split(".")
+        if not 1 <= len(parts) <= 4:
+            return None
+        values: list[int] = []
+        for p in parts:
+            low = p.lower()
+            try:
+                if low.startswith("0x"):
+                    if len(low) == 2:  # bare "0x" is not a number
+                        return None
+                    v = int(low, 16)
+                elif len(p) > 1 and p[0] == "0":
+                    v = int(p, 8)  # leading-zero => octal, matching inet_aton
+                else:
+                    v = int(p, 10)
+            except ValueError:
+                return None  # any non-numeric part => not a numeric IPv4
+            if v < 0:
+                return None
+            values.append(v)
+        # inet_aton width rules: the leading (n-1) parts are single octets; the
+        # final part absorbs the remaining (4 - (n-1)) bytes.
+        n = len(values)
+        if any(v > 0xFF for v in values[:-1]):
+            return None
+        last_bytes = 4 - (n - 1)
+        if values[-1] > (1 << (8 * last_bytes)) - 1:
+            return None
+        octets = list(values[:-1])
+        last = values[-1]
+        for shift in range(last_bytes - 1, -1, -1):
+            octets.append((last >> (8 * shift)) & 0xFF)
+        return ".".join(str(o) for o in octets)
+
     def is_ssrf_target(self, host: str) -> bool:
         """
         Returns True if host is — or resolves to — a blocked address range.
@@ -177,11 +225,28 @@ class NetworkEngine:
             return self._addr_is_blocked(ipaddress.ip_address(host))
         except ValueError:
             pass
+        # M3: alternate numeric IPv4 encodings (decimal/octal/hex/short) that
+        # `ipaddress` rejects but browsers/curl/inet_aton accept. Normalize to
+        # dotted-quad and evaluate as a literal (no DNS — a numeric host has no
+        # name to resolve) so 2130706433 / 0x7f000001 / 127.1 cannot smuggle an
+        # internal target past both the literal check and the resolve.
+        canonical = self._normalize_numeric_ipv4(host)
+        if canonical is not None:
+            try:
+                return self._addr_is_blocked(ipaddress.ip_address(canonical))
+            except ValueError:
+                pass
         # Hostname — resolve all address families. Fail closed on any blocked.
         try:
             infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
         except (OSError, UnicodeError):
-            return False
+            # M3: resolution failure must fail CLOSED. We only reach here with
+            # block_rfc1918_ssrf=True (early return above). A host this resolver
+            # cannot resolve may still be reachable by a downstream fetcher via
+            # split-horizon DNS, an /etc/hosts entry, or DNS rebinding — treat an
+            # unresolvable host as a target and reject it rather than allow it
+            # through the egress guard (previously: return False => fail open).
+            return True
         for info in infos:
             sockaddr = info[4]
             try:

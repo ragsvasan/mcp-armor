@@ -26,7 +26,7 @@ classifiers = [
 # a hash-pinned lockfile — see requirements.lock and docs/GETTING_STARTED.md.
 dependencies = [
     "google-re2>=1.1,<2",
-    "joserfc>=1.0,<2",  # F8: floor at a release with hardened alg-confusion / alg:none defaults
+    "joserfc>=1.6.8,<2",  # F8: floor at a release with hardened alg-confusion / alg:none defaults + empty-key HMAC reject (PYSEC-2026-2528) + RFC7797 payload-size fix (PYSEC-2026-2530)
     "keyring>=24.0,<26",
     "pyyaml>=6.0,<7",
     "jsonschema>=4.20,<5",

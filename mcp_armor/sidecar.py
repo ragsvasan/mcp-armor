@@ -126,6 +126,18 @@ _STRIP_RESPONSE_HEADERS = frozenset(
 # initialize).
 _STRIP_BEFORE_UPSTREAM = frozenset({_SESSION_HEADER_STR})
 
+# Client credential headers dropped before the upstream hop when
+# ``strip_upstream_auth`` is enabled. The upstream is a SEPARATE TRUST DOMAIN (see
+# ``_STRIP_RESPONSE_HEADERS`` and the module docstring — "a compromised upstream
+# must not…"). Forwarding a live ``Authorization``/``Cookie``/``DPoP`` verbatim
+# lets a popped upstream harvest and replay the client's bearer token against any
+# other service that accepts it (plain bearer tokens are not sender-constrained).
+# Stripping is OPT-IN (default off): the common single-trust-domain deployment
+# (armor and the upstream co-owned, sharing the credential's trust domain) needs
+# the credential to reach the upstream. Enable it only when armor terminates auth
+# and the upstream does NOT share that trust domain.
+_UPSTREAM_AUTH_HEADERS = frozenset({"authorization", "cookie", "dpop"})
+
 
 class SidecarDependencyError(RuntimeError):
     """Raised when the optional sidecar dependencies (httpx, uvicorn) are absent."""
@@ -227,8 +239,15 @@ class ForwardingApp:
       by name (first wins) to defeat Content-Type desync; the forwarded
       ``Content-Type`` is overwritten with the canonical ``application/json`` so
       the value the upstream parses is identical to the one the guard validated;
-      CRLF in any forwarded header name or value drops that header (response
-      splitting / smuggling).
+      the client ``Content-Length`` is dropped so httpx reframes the body from
+      ``content=`` (a client CL/TE desync cannot smuggle a second request past the
+      guard); CRLF in any forwarded header name or value drops that header
+      (response splitting / smuggling).
+    - With ``strip_upstream_auth=True`` the client credentials
+      (``Authorization`` / ``Cookie`` / ``DPoP``) are dropped before the upstream
+      hop. Default False preserves the transparent passthrough; enable it only when
+      armor terminates auth and the upstream is a DIFFERENT trust domain, so a
+      compromised upstream cannot harvest and replay the client's bearer token.
     - Only ``POST`` with a non-empty body is proxied (MCP JSON-RPC over HTTP);
       other methods / empty bodies are refused before the upstream hop so a
       request the engines could not meaningfully inspect never reaches it.
@@ -244,6 +263,7 @@ class ForwardingApp:
         upstream: str,
         *,
         allowed_path_prefix: str | None = None,
+        strip_upstream_auth: bool = False,
         max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
         transport: Any = None,
     ) -> None:
@@ -252,6 +272,21 @@ class ForwardingApp:
         # forwarded (so a client with a valid session cannot reach arbitrary
         # non-MCP upstream routes). None = forward any validated path.
         self._allowed_path_prefix = allowed_path_prefix
+        if allowed_path_prefix is None:
+            # Mirror ArmorMiddleware's CORS-unenforced startup warning: an unset
+            # prefix means any request path that passes _validate_path reaches the
+            # upstream host, so a client with a valid session can hit non-MCP routes.
+            log.warning(
+                "ForwardingApp: allowed_path_prefix not configured — path lockdown is "
+                "NOT enforced; any request path that passes _validate_path is forwarded "
+                "to the upstream host. Set allowed_path_prefix (CLI --mcp-path / env "
+                "ARMOR_MCP_PATH), e.g. /api/mcp, to pin the sidecar to the MCP route."
+            )
+        # Opt-in credential stripping before the upstream hop. Default False keeps
+        # the transparent-proxy passthrough the module has always had; True drops
+        # Authorization/Cookie/DPoP so a compromised upstream in a DIFFERENT trust
+        # domain cannot harvest and replay the client's live bearer token.
+        self._strip_upstream_auth = strip_upstream_auth
         self._max_response_bytes = max_response_bytes
         # Optional httpx transport injection — lets tests mount a stub upstream
         # ASGI app without opening a real socket. Production leaves this None.
@@ -355,6 +390,13 @@ class ForwardingApp:
         # drop any header whose name OR value carries CRLF. Content-Type is dropped
         # here and re-set to the canonical value below so the upstream parses
         # exactly what the guard validated (no last-wins/first-wins desync).
+        # Content-Length is dropped for the same reason (H2): httpx recomputes it
+        # authoritatively from content=body, so a client Content-Length that
+        # disagrees with the framed body (a CL/TE desync) cannot survive to the
+        # upstream and smuggle a second, uninspected request past the guard.
+        # When strip_upstream_auth is set, the client credentials
+        # (Authorization / Cookie / DPoP) are also dropped before the
+        # separate-trust-domain hop (M6).
         seen: set[str] = set()
         fwd: list[tuple[bytes, bytes]] = []
         for k_bytes, v_bytes in scope.get("headers", []):
@@ -363,8 +405,10 @@ class ForwardingApp:
                 k in _HOP_BY_HOP
                 or k == "host"
                 or k == "content-type"
+                or k == "content-length"
                 or k in _STRIP_CLIENT_HEADERS
                 or k in _STRIP_BEFORE_UPSTREAM
+                or (self._strip_upstream_auth and k in _UPSTREAM_AUTH_HEADERS)
             ):
                 continue
             v_str = v_bytes.decode("latin-1")
@@ -451,6 +495,7 @@ def build_app(
     max_body_bytes: int | None = None,
     max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
     allowed_path_prefix: str | None = None,
+    strip_upstream_auth: bool = False,
     transport: Any = None,
 ) -> ArmorMiddleware:
     """Assemble the sidecar ASGI stack: ``ArmorMiddleware(ForwardingApp(upstream), guard)``.
@@ -465,8 +510,12 @@ def build_app(
     ``cors_origins`` is forwarded to ``ArmorMiddleware`` (T7-001). Pass ``[]`` to
     block all cross-origin requests, or an explicit allowlist. ``max_response_bytes``
     caps the buffered (untrusted) upstream body. ``allowed_path_prefix`` pins the
-    sidecar to a single MCP route. ``transport`` is an optional httpx transport for
-    the upstream hop (test seam only).
+    sidecar to a single MCP route (a startup warning is logged when it is None).
+    ``strip_upstream_auth`` drops the client ``Authorization``/``Cookie``/``DPoP``
+    before the upstream hop — enable it only when armor terminates auth and the
+    upstream is a different trust domain (default False forwards the credential, so
+    the upstream must share the credential's trust domain). ``transport`` is an
+    optional httpx transport for the upstream hop (test seam only).
     """
     if guard is None and config_path is None:
         raise ValueError("build_app requires either a guard or a config_path")
@@ -481,10 +530,17 @@ def build_app(
     forwarder = ForwardingApp(
         upstream,
         allowed_path_prefix=allowed_path_prefix,
+        strip_upstream_auth=strip_upstream_auth,
         max_response_bytes=max_response_bytes,
         transport=transport,
     )
-    mw_kwargs: dict[str, Any] = {"cors_origins": cors_origins}
+    mw_kwargs: dict[str, Any] = {
+        "cors_origins": cors_origins,
+        # Align the middleware's response ceiling with the forwarder's so a
+        # legitimate large tool result isn't rejected at the middleware before
+        # the forwarder's own streaming cap even applies.
+        "max_response_bytes": max_response_bytes,
+    }
     if max_body_bytes is not None:
         mw_kwargs["max_body_bytes"] = max_body_bytes
     return ArmorMiddleware(forwarder, guard, **mw_kwargs)
@@ -556,7 +612,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=os.environ.get("ARMOR_MCP_PATH") or None,
         help=(
             "Restrict forwarding to this path prefix, e.g. /api/mcp "
-            "(env: ARMOR_MCP_PATH; default: forward any validated path)."
+            "(env: ARMOR_MCP_PATH; default: forward any validated path — a startup "
+            "warning is emitted when unset)."
+        ),
+    )
+    parser.add_argument(
+        "--strip-upstream-auth",
+        dest="strip_upstream_auth",
+        action="store_true",
+        default=os.environ.get("ARMOR_STRIP_UPSTREAM_AUTH", "").strip().lower()
+        in ("1", "true", "yes", "on"),
+        help=(
+            "Strip the client Authorization/Cookie/DPoP headers before forwarding "
+            "to the upstream (env: ARMOR_STRIP_UPSTREAM_AUTH). Enable when armor "
+            "terminates auth and the upstream is a DIFFERENT trust domain, so a "
+            "compromised upstream cannot harvest and replay client bearer tokens. "
+            "Default: off — credentials pass through, so the upstream must share "
+            "the credential's trust domain."
         ),
     )
     return parser.parse_args(argv)
@@ -588,6 +660,7 @@ def main(argv: list[str] | None = None) -> None:
         max_body_bytes=args.max_body_bytes,
         max_response_bytes=args.max_response_bytes,
         allowed_path_prefix=args.mcp_path,
+        strip_upstream_auth=args.strip_upstream_auth,
     )
     log.info(
         "mcp-armor sidecar listening on %s:%d → upstream %s (config: %s)",

@@ -116,7 +116,12 @@ class _GuardedToolDispatcher:
             # decorators on tools dispatched through this path see real scopes.
             from ..guard import _active_ctx as _armor_active_ctx_fmcp
 
-            _armor_active_ctx_fmcp.set(ctx)
+            # Fix 8 parity (mirror the ASGI adapter): save the reset token so the
+            # ContextVar is restored to its prior value in `finally`. Without this
+            # the tool's ctx (user_id/tenant/scopes) leaks to any later
+            # @guard.protect tool or background task running on the SAME asyncio
+            # task — a scope/tenant bleed in a multi-principal async server.
+            _armor_fmcp_token = _armor_active_ctx_fmcp.set(ctx)
 
             tool_name = fn.__name__
             req = MCPRequest(
@@ -153,6 +158,9 @@ class _GuardedToolDispatcher:
                 return result
 
             finally:
+                # Fix 8 parity: reset the ContextVar so no ctx bleeds into a
+                # later tool or background task on the same asyncio Task.
+                _armor_active_ctx_fmcp.reset(_armor_fmcp_token)
                 # FIX-1: always drain the session if it was opened
                 if session_opened:
                     try:

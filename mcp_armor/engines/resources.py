@@ -6,12 +6,13 @@ import asyncio
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
 from ..context import CoSAIContext
 from ..exceptions import ResourceExceededError
-from ..types import CONTENT_BEARING_METHODS, MCPRequest, MCPResponse
+from ..types import CONTENT_BEARING_METHODS, BudgetState, MCPRequest, MCPResponse
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,26 @@ class ResourceEngine:
         # T10-004: zombie session detection.
         # Maps session_id → last-activity monotonic timestamp.
         self._session_last_seen: dict[str, float] = {}
+        # LOW fix (T10-001/002 denial-of-wallet): budget ledger keyed by
+        # session_id — which, in SessionSigner-backed deployments, IS the
+        # signed HMAC session token (see engines/_session_token.py), so only
+        # the holder of a validly-issued token can accumulate/resume budget
+        # under a given key. The zombie reaper below only ever removes entries
+        # from _session_last_seen (to let the adapter free its per-session
+        # context store on idle-eviction); it deliberately never touches this
+        # dict. Without this, an adapter that rebuilds a fresh zero-budget
+        # CoSAIContext after idle-eviction would let an attacker pacing calls
+        # just over heartbeat_interval_secs reset their budget indefinitely.
+        # This dict is the source of truth for budget accounting — cleared
+        # only on_session_end (explicit close), decoupling the accounting
+        # lifetime from the much shorter zombie-reap TTL.
+        # Bounded LRU ledger (see _save_budget). Capped so "persist budget across
+        # idle-eviction" can't become an unbounded-memory DoS: paths that mint and
+        # abandon sessions (HTTP open then zombie-reap, and the per-call
+        # wrap_dispatcher) never reach on_session_end, so without a cap this dict
+        # would grow one permanent entry per session forever.
+        self._session_budgets: OrderedDict[str, BudgetState] = OrderedDict()
+        self._max_budget_entries = 50_000
         self._sessions_lock = threading.Lock()
         self._reaper_task: asyncio.Task | None = None
 
@@ -105,6 +126,30 @@ class ResourceEngine:
                 except Exception as exc:  # pragma: no cover
                     log.warning("ResourceEngine eviction_callback error: %s", exc)
 
+    def _restore_budget(self, ctx: CoSAIContext) -> CoSAIContext:
+        """
+        Return ctx with its budget replaced by the persisted ledger value for
+        this session_id, if one exists. Returns ctx unchanged (same object) if
+        there is no persisted entry yet, so first-touch behaviour is identical
+        to before this fix.
+        """
+        with self._sessions_lock:
+            persisted = self._session_budgets.get(ctx.session_id)
+            if persisted is not None:
+                self._session_budgets.move_to_end(ctx.session_id)  # mark recently used
+        if persisted is not None:
+            return ctx.with_budget(persisted)
+        return ctx
+
+    def _save_budget(self, session_id: str, budget: BudgetState) -> None:
+        with self._sessions_lock:
+            self._session_budgets[session_id] = budget
+            self._session_budgets.move_to_end(session_id)
+            # LRU-evict oldest entries beyond the cap — bounds memory on the
+            # mint-and-abandon paths that never reach on_session_end.
+            while len(self._session_budgets) > self._max_budget_entries:
+                self._session_budgets.popitem(last=False)
+
     async def close(self) -> None:
         """Cancel the background reaper task. Call from lifespan shutdown."""
         if self._reaper_task is not None and not self._reaper_task.done():
@@ -117,6 +162,11 @@ class ResourceEngine:
     async def on_session_start(self, ctx: CoSAIContext) -> CoSAIContext:
         with self._sessions_lock:
             self._session_last_seen[ctx.session_id] = time.monotonic()
+        # Resume the persisted budget (if this session_id/token was seen
+        # before and idle-evicted) instead of trusting a freshly-built ctx's
+        # zeroed budget. No-op (returns ctx unchanged) on first touch.
+        ctx = self._restore_budget(ctx)
+        self._save_budget(ctx.session_id, ctx.budget)
         return ctx
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
@@ -130,6 +180,11 @@ class ResourceEngine:
         if req.method not in CONTENT_BEARING_METHODS:
             return ctx
 
+        # LOW fix: pull in the persisted ledger before evaluating limits. This
+        # is the second (belt-and-suspenders) restore point alongside
+        # on_session_start — whichever the adapter actually invokes for a
+        # revived session, the persisted budget wins over a rebuilt zero one.
+        ctx = self._restore_budget(ctx)
         budget = ctx.budget
         elapsed = time.monotonic() - budget.wall_clock_start
 
@@ -151,7 +206,9 @@ class ResourceEngine:
                     f"Tool argument nesting depth {depth} exceeds limit {self._max_arg_depth} (T10-003)"
                 )
 
-        return ctx.with_budget(budget.increment())
+        new_ctx = ctx.with_budget(budget.increment())
+        self._save_budget(new_ctx.session_id, new_ctx.budget)
+        return new_ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
         return ctx
@@ -159,6 +216,7 @@ class ResourceEngine:
     async def on_session_end(self, ctx: CoSAIContext) -> None:
         with self._sessions_lock:
             self._session_last_seen.pop(ctx.session_id, None)
+            self._session_budgets.pop(ctx.session_id, None)
 
     async def on_shutdown(self) -> None:
         await self.close()

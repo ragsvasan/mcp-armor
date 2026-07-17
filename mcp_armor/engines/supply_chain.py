@@ -136,8 +136,15 @@ class SupplyChainEngine:
         """
         Verify that the tool definition was signed with the registry's Ed25519 key.
 
-        Signature covers the canonical JSON of the tool definition.
-        Signature is stored in the `_sig` field or provided as a sidecar.
+        Signature covers the canonical JSON of the tool definition, excluding
+        only the `_sig` field itself (which carries the signature and cannot
+        sign itself). LOW fix: this previously excluded EVERY `_`-prefixed
+        key, not just `_sig` — meaning any future `_`-prefixed field a
+        consumer reads would have been unsigned side-channel data, freely
+        rewritable by an attacker without invalidating the signature. Only
+        `_sig` is excluded now, so any other `_`-prefixed field is part of the
+        signed body like everything else. Signature is stored in the `_sig`
+        field or provided as a sidecar.
         """
         import binascii
 
@@ -149,7 +156,7 @@ class SupplyChainEngine:
 
         try:
             canonical = json.dumps(
-                {k: v for k, v in tool.items() if not k.startswith("_")},
+                {k: v for k, v in tool.items() if k != "_sig"},
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()

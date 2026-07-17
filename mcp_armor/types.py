@@ -137,9 +137,25 @@ class MCPRequest:
         url_query_params: dict[str, str] | None = None,
         transport: str = "http",
     ) -> MCPRequest:
+        # A JSON-RPC request MAY carry positional (array) or scalar `params`, but
+        # mcp-armor's engines only inspect object params. Coercing a non-object to
+        # {} would make the guard scan an EMPTY params while the raw array/scalar
+        # is still forwarded to the backend verbatim (the ASGI adapter replays
+        # raw_body; wrap_dispatcher passes the original payload) — a scan/forward
+        # asymmetry that lets injection payloads in by-position params reach an
+        # upstream doing positional binding, unscanned. Reject non-object params:
+        # fail CLOSED so the guard never forwards a representation it did not scan.
+        params_obj = d.get("params", {})
+        if not isinstance(params_obj, dict):
+            from .exceptions import ValidationError
+
+            raise ValidationError(
+                "JSON-RPC params must be a JSON object; positional (array) or "
+                "scalar params are not supported by the mcp-armor guard"
+            )
         return cls(
             method=str(d.get("method", "")),
-            params=MappingProxyType(dict(d.get("params", {}))),
+            params=MappingProxyType(dict(params_obj)),
             session_id=session_id,
             raw_headers=MappingProxyType(headers),
             url_query_params=MappingProxyType(url_query_params or {}),
@@ -193,12 +209,21 @@ class MCPResponse:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MCPResponse:
-        raw = str(d)[:65536]
+        # H1 (response scan/forward asymmetry): the detectors must inspect the
+        # FULL body that is forwarded to the client. The 64 KB cap is applied
+        # ONLY to raw_body (the escaped, rendered/audited view) — NOT to
+        # scan_body. A PII/secret payload positioned past 64 KB, or any bytes the
+        # old truncation dropped, were previously egress'd unscanned.
+        raw = str(d)
+        # Guard result/error: only wrap true mappings. A non-object result (e.g.
+        # a list or scalar) would make MappingProxyType(...) raise TypeError.
+        result = d.get("result")
+        error = d.get("error")
         return cls(
-            result=MappingProxyType(d["result"]) if "result" in d else None,
-            error=MappingProxyType(d["error"]) if "error" in d else None,
-            raw_body=html.escape(raw, quote=True),  # cap + escape for rendering
-            scan_body=normalize_for_scan(raw),  # what detectors must see (F1)
+            result=MappingProxyType(result) if isinstance(result, dict) else None,
+            error=MappingProxyType(error) if isinstance(error, dict) else None,
+            raw_body=html.escape(raw[:65536], quote=True),  # cap ONLY for rendering
+            scan_body=normalize_for_scan(raw),  # full body — what detectors must see (F1/H1)
         )
 
     @classmethod
@@ -209,12 +234,14 @@ class MCPResponse:
         HTML-escape bypass cannot recur on the @guard.protect()/FastMCP
         decorator paths either.
         """
-        raw = text[:65536]
+        # H1 parity with from_dict: cap ONLY the rendered raw_body; scan the FULL
+        # text so a PII/secret positioned past 64 KB in a tool result is not
+        # returned unscanned on the @guard.protect / FastMCP decorator path.
         return cls(
             result=None,
             error=None,
-            raw_body=html.escape(raw, quote=True),
-            scan_body=normalize_for_scan(raw),
+            raw_body=html.escape(text[:65536], quote=True),
+            scan_body=normalize_for_scan(text),
         )
 
 

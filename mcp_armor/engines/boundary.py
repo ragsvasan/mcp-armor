@@ -21,10 +21,24 @@ from ..types import (
     scannable_strings,
 )
 
-# Truncate strings to this length before regex scanning to bound worst-case time
-# when re2 is unavailable. Injection phrases are short; this doesn't create a
-# meaningful detection gap.
+# Per-regex-call length bound used ONLY when re2 (linear-time) is unavailable —
+# it bounds stdlib `re`'s worst-case time per call. LOW fix: this used to be
+# applied as a hard truncation of the whole string, which meant a payload
+# positioned past this offset was never scanned even though the full body is
+# what gets forwarded — the same "scan what you forward" gap as the response
+# scan/forward asymmetry. It is now used two ways instead: (1) when re2 IS
+# loaded, _scan() does not cap length at all — re2 is linear-time regardless
+# of input size, so capping bought nothing but a blind spot; (2) when re2 is
+# unavailable, _scan_windows() slides this-sized, overlapping windows across
+# the FULL text so every byte is still scanned, with each regex call still
+# bounded to this many chars.
 _MAX_SCAN_LEN = 8_192
+
+# Overlap between consecutive scan windows (see _scan_windows) — generous vs.
+# the longest injection pattern's maximum matchable span (well under 100 chars)
+# so a pattern straddling a window boundary is always fully contained in the
+# next window and cannot be split across the seam.
+_SCAN_WINDOW_OVERLAP = 1_024
 
 # ---------------------------------------------------------------------------
 # Normalization pipeline (Fix 7)
@@ -126,6 +140,35 @@ def _try_decode_base64_tokens(text: str) -> str | None:
     return " ".join(decoded_parts) if decoded_parts else None
 
 
+def _scan_windows(
+    text: str, window: int = _MAX_SCAN_LEN, overlap: int = _SCAN_WINDOW_OVERLAP
+) -> list[str]:
+    """
+    Split `text` into overlapping windows of at most `window` chars each, with
+    `overlap` chars shared between consecutive windows.
+
+    Used only on the re2-unavailable fallback path: bounds each individual
+    regex call to `window` chars (the historical ReDoS guard for stdlib `re`)
+    while still covering every byte of `text` — a payload placed past a fixed
+    offset can no longer evade detection simply by position. The overlap
+    guarantees a pattern straddling a window boundary is fully contained
+    within the following window.
+    """
+    if len(text) <= window:
+        return [text]
+    stride = window - overlap
+    windows: list[str] = []
+    n = len(text)
+    start = 0
+    while True:
+        end = min(start + window, n)
+        windows.append(text[start:end])
+        if end >= n:
+            break
+        start += stride
+    return windows
+
+
 # ---------------------------------------------------------------------------
 # Injection pattern library
 # ---------------------------------------------------------------------------
@@ -185,48 +228,72 @@ class BoundaryEngine:
     def __init__(self, scan_call_args: bool = True, scan_responses: bool = True) -> None:
         self._scan_call_args = scan_call_args
         self._scan_responses = scan_responses
+        # Set for real by _compile_patterns() below; declared here so the
+        # attribute always exists regardless of which branch it takes.
+        self._using_re2 = False
         self._compiled = self._compile_patterns()
 
     def _compile_patterns(self) -> list[Any]:
         try:
             import re2 as re
+
+            self._using_re2 = True
         except ImportError:
             import re  # type: ignore[no-redef]
+
+            self._using_re2 = False
         return [re.compile(p) for p in _ALL_PATTERNS]
 
     def _scan(self, text: str) -> str | None:
         """
         Return the matched pattern string, or None.
 
-        Scans both:
+        Scans:
         1. The original text (catches obvious patterns)
         2. A normalized copy (catches split-word, zero-width, hyphenated bypasses)
         3. Any Base64-decoded content found in the text (catches encoded payloads)
+
+        LOW fix (boundary.py + trust.py, which delegates here): the match step
+        used to truncate every candidate to _MAX_SCAN_LEN before matching, so a
+        payload positioned past that fixed offset could never be seen even
+        though the full body is what gets forwarded. Now: when re2 is loaded
+        the match step runs over the FULL text with no length cap at all (re2
+        is linear-time, so capping it bought nothing but a blind spot). When
+        re2 is unavailable, each regex call is still bounded to _MAX_SCAN_LEN
+        chars, but applied across overlapping windows spanning the entire text
+        (_scan_windows) instead of just the first window.
         """
-        # Run on original text first
-        scan_candidates = [text[:_MAX_SCAN_LEN] if len(text) > _MAX_SCAN_LEN else text]
+        # Base64 detection surface is unchanged by this fix: it stays bounded
+        # to the first _MAX_SCAN_LEN chars of the (possibly normalized) text,
+        # per the existing Fix 4 CPU-DoS guard in _try_decode_base64_tokens.
+        b64_source = text[:_MAX_SCAN_LEN] if len(text) > _MAX_SCAN_LEN else text
+        decoded = _try_decode_base64_tokens(b64_source)
+        decoded_norm = _normalize_for_injection_scan(decoded) if decoded else None
 
-        # Build normalized form and add if it differs from original
         normalized = _normalize_for_injection_scan(text)
-        if len(normalized) > _MAX_SCAN_LEN:
-            normalized = normalized[:_MAX_SCAN_LEN]
-        if normalized != scan_candidates[0]:
-            scan_candidates.append(normalized)
 
-        # Add Base64-decoded surface if any token decodes to valid UTF-8.
-        # Fix 4: pass the already-truncated scan_candidates[0] so the regex
-        # never runs over more than _MAX_SCAN_LEN bytes of text.
-        decoded = _try_decode_base64_tokens(scan_candidates[0])
-        if decoded:
-            decoded_norm = _normalize_for_injection_scan(decoded)
-            scan_candidates.append(
-                decoded_norm[:_MAX_SCAN_LEN] if len(decoded_norm) > _MAX_SCAN_LEN else decoded_norm
-            )
+        sources = [text]
+        if normalized != text:
+            sources.append(normalized)
+        if decoded_norm:
+            sources.append(decoded_norm)
 
-        for candidate in scan_candidates:
-            for pattern in self._compiled:
-                if pattern.search(candidate):
-                    return pattern.pattern
+        if self._using_re2:
+            # Linear-time regardless of input size — no length cap needed.
+            for source in sources:
+                for pattern in self._compiled:
+                    if pattern.search(source):
+                        return pattern.pattern
+            return None
+
+        # No re2: bound each regex call to _MAX_SCAN_LEN chars but slide
+        # across the full text in overlapping windows so a payload past the
+        # old fixed offset can no longer evade detection.
+        for source in sources:
+            for window in _scan_windows(source):
+                for pattern in self._compiled:
+                    if pattern.search(window):
+                        return pattern.pattern
         return None
 
     def _scan_values(self, obj: Any) -> str | None:
