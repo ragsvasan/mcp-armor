@@ -13,9 +13,20 @@ class CoSAIException(Exception):
     threat: ThreatCategory
     json_rpc_code: int
 
-    def __init__(self, message: str, finding: Finding | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        finding: Finding | None = None,
+        *,
+        resolution: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.finding = finding
+        # BUG-47: optional caller-facing hint on how to fix the request that
+        # triggered this error. Surfaced in to_jsonrpc_error() below. Not
+        # every exception site sets this yet — it is opt-in per raise site,
+        # not a required field, so existing call sites keep working unchanged.
+        self.resolution = resolution
 
 
 # Layer 1 — Transport / Session
@@ -133,10 +144,13 @@ _HTTP_STATUS: dict[int, int] = {
 
 
 def to_jsonrpc_error(exc: CoSAIException) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "code": exc.json_rpc_code,
         "message": str(exc),
     }
+    if exc.resolution:
+        payload["resolution"] = exc.resolution
+    return payload
 
 
 def to_http_status(exc: CoSAIException) -> int:

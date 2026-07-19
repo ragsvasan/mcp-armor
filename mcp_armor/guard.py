@@ -181,6 +181,11 @@ class CoSAIGuard:
                 ValidationEngine(
                     max_payload_bytes=cfg.t3.max_payload_bytes,
                     strict_schema=cfg.t3.strict_schema,
+                    prose_field_names=(
+                        frozenset(cfg.t3.prose_field_names)
+                        if cfg.t3.prose_field_names is not None
+                        else None
+                    ),
                 )
             )
 

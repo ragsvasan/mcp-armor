@@ -48,7 +48,7 @@ _KNOWN_T2 = frozenset(
         "echo_confirm_token",
     }
 )
-_KNOWN_T3 = frozenset({"enabled", "max_payload_bytes", "strict_schema"})
+_KNOWN_T3 = frozenset({"enabled", "max_payload_bytes", "strict_schema", "prose_field_names"})
 _KNOWN_T4 = frozenset({"enabled", "scan_definitions", "scan_responses", "scan_call_args"})
 _KNOWN_T5 = frozenset({"enabled", "profile"})
 _KNOWN_T6 = frozenset(
@@ -184,6 +184,13 @@ class T2Config:
 class T3Config:
     max_payload_bytes: int = 65_536
     strict_schema: bool = True
+    # T3-002 prose exemption (BUG-46 / BUG-46 adversarial follow-up): field
+    # names THIS deployment's own tool schemas document as free-text prose
+    # (e.g. vitalsync's log_workout.sessionNotes). None (the default) exempts
+    # nothing — there is no library-wide generic default. A deployment must
+    # opt in explicitly, scoped to the fields it actually protects, via the
+    # T3.prose_field_names key in its cosai.yaml.
+    prose_field_names: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -371,6 +378,11 @@ def load_config(path: str | Path) -> ArmorConfig:
         T3Config(
             max_payload_bytes=int(t3_raw.get("max_payload_bytes", 65_536)),
             strict_schema=bool(t3_raw.get("strict_schema", True)),
+            prose_field_names=(
+                tuple(t3_raw.get("prose_field_names"))
+                if t3_raw.get("prose_field_names") is not None
+                else None
+            ),
         )
         if t3_raw is not None
         else None

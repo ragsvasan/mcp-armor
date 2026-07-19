@@ -358,3 +358,98 @@ def test_regression_empty_t6_allowlist_preserved_not_allow_all(tmp_path: Path) -
     cfg = load_config(p)
     assert cfg.t6 is not None
     assert cfg.t6.tool_allowlist == ()
+
+
+# ---------------------------------------------------------------------------
+# BUG-46 adversarial follow-up: T3.prose_field_names is a per-deployment
+# opt-in, not a library-wide default — see docs/audits/
+# 2026-07-18-session2-dogfooding-bugs.md, prose-field-exemption findings.
+# ---------------------------------------------------------------------------
+
+
+def test_regression_t3_prose_field_names_absent_is_none(tmp_path: Path) -> None:
+    """Absent prose_field_names key must remain None — ValidationEngine then
+    exempts NOTHING (no implicit global default), closing the leak where
+    every armored server inherited the same 26-name exemption."""
+    p = _write(
+        tmp_path,
+        """
+        version: 1
+        threats:
+          T3:
+            enabled: true
+    """,
+    )
+    cfg = load_config(p)
+    assert cfg.t3 is not None
+    assert cfg.t3.prose_field_names is None
+
+
+def test_regression_t3_prose_field_names_loaded_from_config(tmp_path: Path) -> None:
+    """A deployment that opts in explicitly gets exactly the fields it
+    named, as a tuple — this is the per-deployment scoping mechanism that
+    replaced the removed global DEFAULT_PROSE_FIELD_NAMES default."""
+    p = _write(
+        tmp_path,
+        """
+        version: 1
+        threats:
+          T3:
+            enabled: true
+            prose_field_names:
+              - sessionNotes
+              - notes
+    """,
+    )
+    cfg = load_config(p)
+    assert cfg.t3 is not None
+    assert cfg.t3.prose_field_names == ("sessionNotes", "notes")
+
+
+@pytest.mark.asyncio
+async def test_regression_t3_prose_field_names_wired_into_guard_validation_engine(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: CoSAIGuard.from_config() must actually pass
+    T3Config.prose_field_names through to the constructed ValidationEngine —
+    a config field that parses but is never wired into the engine is a
+    silent no-op, exactly the kind of gap that let the old global default
+    hide undetected."""
+    from mcp_armor.engines.validation import ValidationEngine
+    from mcp_armor.exceptions import ValidationError
+    from mcp_armor.guard import CoSAIGuard
+    from tests.conftest import make_ctx, make_request
+
+    p = _write(
+        tmp_path,
+        """
+        version: 1
+        threats:
+          T3:
+            enabled: true
+            strict_schema: false
+            prose_field_names:
+              - sessionNotes
+    """,
+    )
+    guard = CoSAIGuard.from_config(p)
+    validation_engines = [e for e in guard._engines if isinstance(e, ValidationEngine)]
+    assert len(validation_engines) == 1
+    engine = validation_engines[0]
+
+    ctx = make_ctx()
+    req = make_request(
+        method="tools/call",
+        params={"name": "log_workout", "arguments": {"sessionNotes": "felt strong & fast"}},
+    )
+    result = await engine.on_request(ctx, req)
+    assert result is ctx
+
+    # A field NOT in the configured set is still bare-checked.
+    ctx2 = make_ctx()
+    req2 = make_request(
+        method="tools/call",
+        params={"name": "log_workout", "arguments": {"query": "; rm -rf /"}},
+    )
+    with pytest.raises(ValidationError):
+        await engine.on_request(ctx2, req2)
