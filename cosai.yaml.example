@@ -105,6 +105,12 @@ threats:
     # (proof-of-possession) is enforced by T1 via the access token's cnf.jkt
     # claim — there is no DPoP-binding knob here (the old bind_session_to_dpop
     # flag was a no-op label and has been removed).
+    #
+    # CoSAI v2.0 TN-04 / SD-02 (opt-in): EnvelopeEngine rejects `_meta`
+    # identity/role claims that conflict with the authenticated principal, and
+    # enforces MCP 2026-07-28 header/body consistency (-32020 / -32022, HTTP 400).
+    # enforce_request_envelope: true
+    # allowed_meta_keys: ["com.example/feature"]   # strict mode: reject any other key
 
   T8:
     enabled: true

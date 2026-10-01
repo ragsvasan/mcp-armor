@@ -34,6 +34,17 @@ def wrap_dispatcher(dispatcher: Dispatcher, guard: CoSAIGuard) -> Dispatcher:
         response = await protected({"method": "tools/call", "params": {...}})
     """
 
+    from ..engines.envelope import EnvelopeEngine
+
+    if any(isinstance(e, EnvelopeEngine) for e in guard._engines):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "mcp-armor: wrap_dispatcher enforces T7 _meta reconciliation but NOT the "
+            "MCP 2026-07-28 header/body checks (no HTTP headers on this transport); "
+            "serve HTTP traffic through ArmorMiddleware."
+        )
+
     async def protected(payload: dict[str, Any]) -> dict[str, Any]:
         from ..context import CoSAIContext, set_context
         from ..exceptions import CoSAIException, to_jsonrpc_error
@@ -60,7 +71,15 @@ def wrap_dispatcher(dispatcher: Dispatcher, guard: CoSAIGuard) -> Dispatcher:
             return raw_resp
         except CoSAIException as exc:
             from ..exceptions import to_jsonrpc_error
+            from ..request_envelope import MetaTrustError, RequestMetadataError
 
-            return {"jsonrpc": "2.0", "id": payload.get("id"), "error": to_jsonrpc_error(exc)}
+            error = to_jsonrpc_error(exc)
+            # Envelope / _meta errors name headers or echo client-chosen _meta
+            # keys: keep that detail in the log only (parity with ArmorMiddleware).
+            if isinstance(exc, MetaTrustError):
+                error["message"] = "Authorization error"
+            elif isinstance(exc, RequestMetadataError):
+                error["message"] = "Request rejected"
+            return {"jsonrpc": "2.0", "id": payload.get("id"), "error": error}
 
     return protected

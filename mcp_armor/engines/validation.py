@@ -188,7 +188,8 @@ class ValidationEngine:
             frozenset() if prose_field_names is None else prose_field_names
         )
         self._tool_schemas: dict[str, dict[str, Any]] = {}
-        # Guards _tool_schemas — on_response auto-registration can run on multiple
+        # Guards _tool_schemas — guard-committed registration (register_tools after
+        # an accepted tools/list) can run on multiple
         # concurrent asyncio tasks (one per session); the lock keeps registration
         # from interleaving partial writes.
         self._schema_lock = threading.Lock()
@@ -468,22 +469,12 @@ class ValidationEngine:
         return ctx
 
     async def on_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
-        # A1 fix: auto-register tool input schemas from the observed tools/list
-        # response — mirroring IntegrityEngine.on_response / SupplyChainEngine.
-        # on_response. Without this, `_tool_schemas` is never populated on any
-        # live adapter path, so with the default strict_schema=True EVERY
-        # tools/call was rejected with "no registered schema" (self-DoS).
-        #
-        # The MCP protocol mandates that a client fetches tools/list (to learn
-        # tool names + inputSchema) before it can issue a tools/call, and the
-        # adapter routes that tools/list response through this hook, so by the
-        # time the first tools/call arrives the schema is registered. Schemas
-        # live on the engine instance (shared across sessions by the guard), so
-        # one observed manifest populates enforcement for all callers.
-        if resp.result is not None and "tools" in resp.result:
-            tools = resp.result.get("tools")
-            if isinstance(tools, list):
-                self.register_tools([t for t in tools if isinstance(t, dict)])
+        # A1: tool input schemas are learned from the observed tools/list — but
+        # committed by CoSAIGuard._run_response only after the whole response
+        # chain accepted the manifest, and only for a genuine tools/list round
+        # trip. Registering here (first-write-wins) let a manifest that T11
+        # later rejected, or any result carrying a top-level "tools" key, pin a
+        # permissive schema process-wide.
         return ctx
 
     async def on_session_end(self, ctx: CoSAIContext) -> None:

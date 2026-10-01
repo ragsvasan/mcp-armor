@@ -127,6 +127,10 @@ class MCPRequest:
     )
     # Transport type — used by SessionEngine to detect cross-transport replay (T7-003)
     transport: str = "http"
+    # Raw (name, value) header pairs in arrival order, duplicates preserved —
+    # used by EnvelopeEngine to reject duplicated MCP routing headers that the
+    # de-duplicated raw_headers mapping would hide.
+    raw_header_pairs: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_dict(
@@ -136,6 +140,7 @@ class MCPRequest:
         headers: dict[str, str],
         url_query_params: dict[str, str] | None = None,
         transport: str = "http",
+        header_pairs: tuple[tuple[str, str], ...] = (),
     ) -> MCPRequest:
         # A JSON-RPC request MAY carry positional (array) or scalar `params`, but
         # mcp-armor's engines only inspect object params. Coercing a non-object to
@@ -160,6 +165,7 @@ class MCPRequest:
             raw_headers=MappingProxyType(headers),
             url_query_params=MappingProxyType(url_query_params or {}),
             transport=transport,
+            raw_header_pairs=header_pairs,
         )
 
 

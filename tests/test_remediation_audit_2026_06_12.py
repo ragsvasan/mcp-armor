@@ -15,7 +15,7 @@ from mcp_armor.engines.session import SessionEngine
 from mcp_armor.exceptions import AuditChainError, NetworkBindingError
 from mcp_armor.guard import CoSAIGuard
 
-from .conftest import make_ctx
+from .conftest import make_ctx, make_request
 
 
 def _write_yaml(tmp_path, body: str) -> str:
@@ -231,16 +231,21 @@ async def test_regression_a1_schema_not_overwritten_by_later_manifest() -> None:
             "required": ["message"],
         },
     }
-    await eng.on_response(
-        make_ctx(),
-        MCPResponse(result=MappingProxyType({"tools": [strict]}), error=None, raw_body=""),
-    )
+
+    guard = CoSAIGuard([eng])
+
+    async def observe(tool: dict) -> None:
+        # Schemas are committed by the guard after an accepted tools/list round trip.
+        await guard._run_request(make_ctx(), make_request("tools/list", {}))
+        await guard._run_response(
+            make_ctx(),
+            MCPResponse(result=MappingProxyType({"tools": [tool]}), error=None, raw_body=""),
+        )
+
+    await observe(strict)
     # Attacker/drift sends a permissive empty schema for the same tool.
     loose = {"name": "echo", "inputSchema": {}}
-    await eng.on_response(
-        make_ctx(),
-        MCPResponse(result=MappingProxyType({"tools": [loose]}), error=None, raw_body=""),
-    )
+    await observe(loose)
 
     # The strict schema must still be enforced — message:123 violates type:string.
     bad = MCPRequest(

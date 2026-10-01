@@ -18,11 +18,15 @@ from .context import CoSAIContext, set_context
 # (with real JWT scopes, user_id, etc.) rather than a blank stdio context.
 # Default is None — indicates no active ASGI request (stdio / test path).
 _active_ctx: ContextVar[CoSAIContext | None] = ContextVar("mcp_armor_ctx", default=None)
+# Method of the request whose response is being processed (async-task local):
+# tool schemas are committed only for a genuine tools/list round trip.
+_inflight_method: ContextVar[str | None] = ContextVar("mcp_armor_inflight", default=None)
 from .engines.audit import AuditEngine
 from .engines.auth import AuthEngine
 from .engines.authz import AuthzEngine
 from .engines.base import ProtectionEngine
 from .engines.boundary import BoundaryEngine
+from .engines.envelope import EnvelopeEngine
 from .engines.integrity import IntegrityEngine
 from .engines.network import NetworkEngine
 from .engines.protection import ProtectionEngine as PIIEngine
@@ -36,7 +40,8 @@ from .types import MCPRequest, MCPResponse
 
 log = logging.getLogger(__name__)
 
-_THREAT_ENGINE_TYPES: dict[str, type] = {}  # populated after class definitions below
+# populated after class definitions below
+_THREAT_ENGINE_TYPES: dict[str, type | tuple[type, ...]] = {}
 
 
 class CoSAIGuard:
@@ -140,6 +145,18 @@ class CoSAIGuard:
             engines.append(
                 SessionEngine(require_initialized_handshake=cfg.t7.require_initialized_handshake)
             )
+            if cfg.t7.enforce_request_envelope:
+                # Needs the authenticated identity (T1) — and is placed after
+                # T2 below so schema-dependent outcomes (unknown tool,
+                # Mcp-Param-*) can't distinguish tools T2 hides from the caller.
+                if cfg.t1 is None:
+                    log.warning(
+                        "CoSAIGuard: T7.enforce_request_envelope is on but T1 is disabled — "
+                        "there is no authenticated principal, so EVERY identity-named "
+                        "_meta key will be rejected. Enable T1 or list keys in "
+                        "T7.allowed_meta_keys."
+                    )
+                envelope = EnvelopeEngine(allowed_meta_keys=cfg.t7.allowed_meta_keys)
 
         if cfg.t8 is not None:
             engines.append(
@@ -175,6 +192,9 @@ class CoSAIGuard:
                     echo_confirm_token=cfg.t2.echo_confirm_token,
                 )
             )
+
+        if cfg.t7 is not None and cfg.t7.enforce_request_envelope:
+            engines.append(envelope)
 
         if cfg.t3 is not None:
             engines.append(
@@ -264,7 +284,7 @@ class CoSAIGuard:
         - IntegrityEngine.scan_tool_manifest() — T6 typosquat + homoglyph scan
         """
         for engine in self._engines:
-            if isinstance(engine, ValidationEngine):
+            if isinstance(engine, (ValidationEngine, EnvelopeEngine)):
                 engine.register_tools(tools)
             elif isinstance(engine, SupplyChainEngine):
                 engine.validate_tools(tools)
@@ -296,6 +316,8 @@ class CoSAIGuard:
     async def _run_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
         from .exceptions import AuthenticationError, AuthorizationError
 
+        _inflight_method.set(req.method)
+
         for engine in self._engines:
             if self._dry_run:
                 try:
@@ -321,8 +343,18 @@ class CoSAIGuard:
         return ctx
 
     async def _run_response(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
+        try:
+            return await self._run_response_chain(ctx, resp)
+        finally:
+            # Consume the in-flight method even when an engine raised: a later
+            # _run_response on this task with no matching _run_request must
+            # never inherit "tools/list".
+            _inflight_method.set(None)
+
+    async def _run_response_chain(self, ctx: CoSAIContext, resp: MCPResponse) -> CoSAIContext:
         from .exceptions import AuthenticationError, AuthorizationError
 
+        violated = False
         for engine in reversed(self._engines):
             if self._dry_run:
                 try:
@@ -331,6 +363,7 @@ class CoSAIGuard:
                     # Fix 2: auth errors are NEVER suppressed in dry_run.
                     if isinstance(exc, (AuthorizationError, AuthenticationError)):
                         raise
+                    violated = True
                     log.warning(
                         "CoSAIGuard [dry_run] WOULD HAVE BLOCKED response [%s/%s]: %s",
                         type(engine).__name__,
@@ -341,7 +374,28 @@ class CoSAIGuard:
             else:
                 ctx = await engine.on_response(ctx, resp)
             set_context(ctx)
+        if not violated:
+            self._commit_tool_schemas(resp)
         return ctx
+
+    def _commit_tool_schemas(self, resp: MCPResponse) -> None:
+        """Learn tool input schemas from an ACCEPTED tools/list response.
+
+        Runs only after every response engine (T11 allowlist/signature, T6
+        manifest scan, …) passed, and only when the request in flight on this
+        task was tools/list — so a rejected manifest, or any other result that
+        happens to carry a top-level "tools" key, can never pin a schema in the
+        first-write-wins stores (T3 ValidationEngine, EnvelopeEngine).
+        """
+        if _inflight_method.get() != "tools/list" or resp.result is None:
+            return
+        tools = resp.result.get("tools")
+        if not isinstance(tools, list):
+            return
+        manifest = [t for t in tools if isinstance(t, dict)]
+        for engine in self._engines:
+            if isinstance(engine, (ValidationEngine, EnvelopeEngine)):
+                engine.register_tools(manifest)
 
     async def _audit_dry_run(self, ctx: CoSAIContext, req: MCPRequest, exc: CoSAIException) -> None:
         """Write a dry_run-tagged record to AuditEngine if one is present."""
@@ -463,6 +517,14 @@ class CoSAIGuard:
         else:
             active = list(self._engines)
 
+        if any(isinstance(e, EnvelopeEngine) for e in active):
+            log.warning(
+                "mcp-armor: T7.enforce_request_envelope is inert on @guard.protect "
+                "(%s) — the client's _meta and headers are not visible here; it is "
+                "enforced only where ArmorMiddleware fronts the server.",
+                threats if threats is not None else "all threats",
+            )
+
         if pii_profile is not None:
             active = [
                 PIIEngine(profile=pii_profile) if isinstance(e, PIIEngine) else e for e in active
@@ -537,6 +599,9 @@ _THREAT_ENGINE_TYPES.update(
         "T4": BoundaryEngine,
         "T5": PIIEngine,
         "T6": IntegrityEngine,
+        # EnvelopeEngine is deliberately NOT mapped: on the protect() path the
+        # request is synthesized without the client's _meta/headers, so listing
+        # it would claim enforcement that cannot happen there.
         "T7": SessionEngine,
         "T8": NetworkEngine,
         "T9": TrustEngine,

@@ -103,6 +103,11 @@ mcp_armor/
   config.py            Typed ArmorConfig frozen dataclasses + cosai.yaml loader
   context.py           CoSAIContext frozen dataclass + ContextVar
   types.py             MCPRequest, MCPResponse, Finding, BudgetState
+  explicit_state.py    CoSAI v2.0 SD-01/SD-03 — RequestStateSealer, HandleRegistry
+  request_envelope.py  CoSAI v2.0 TN-04/SD-02 — header/body validation, _meta reconciliation
+  meta_identity.py     Shared identity-key predicate (_meta, baggage, tracestate)
+  mcp_protocol.py      MCP 2026-07-28 constants + header helpers
+  tracecontext.py      W3C trace context rules (LO-03)
   exceptions.py        12 typed exceptions + JSON-RPC codes
   engines/
     base.py            ProtectionEngine Protocol
@@ -113,6 +118,7 @@ mcp_armor/
     protection.py      T5 — PII scrubbing (5 profiles)
     integrity.py       T6 — NFKC homoglyph, Levenshtein, drift detection
     session.py         T7 — fixation prevention, transport binding
+    envelope.py        T7/T2 — opt-in EnvelopeEngine (2026-07-28 envelope + _meta trust)
     network.py         T8 — bind address, SSRF detection
     trust.py           T9 — LLM output sanitization (5-step pipeline)
     resources.py       T10 — call budget, wall-clock, loop depth

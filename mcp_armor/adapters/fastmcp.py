@@ -88,6 +88,14 @@ class _GuardedToolDispatcher:
     """
 
     def __init__(self, guard: CoSAIGuard) -> None:
+        from ..engines.envelope import EnvelopeEngine
+
+        if any(isinstance(e, EnvelopeEngine) for e in guard._engines):
+            log.warning(
+                "mcp-armor: T7.enforce_request_envelope is NOT enforced on the per-tool "
+                "hook path — the client's _meta and headers are not visible here. Serve "
+                "through wrap_fastmcp/ArmorMiddleware for _meta and header checks."
+            )
         self._guard = guard
 
     def hook(self, fn: Any, transport: str = "stdio") -> Any:

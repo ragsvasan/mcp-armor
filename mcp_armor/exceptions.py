@@ -140,6 +140,10 @@ _HTTP_STATUS: dict[int, int] = {
     -32010: 429,
     -32011: 500,
     -32602: 400,
+    # MCP 2026-07-28 request envelope (request_envelope.RequestMetadataError)
+    -32600: 400,
+    -32020: 400,
+    -32022: 400,
 }
 
 
@@ -150,6 +154,9 @@ def to_jsonrpc_error(exc: CoSAIException) -> dict[str, Any]:
     }
     if exc.resolution:
         payload["resolution"] = exc.resolution
+    data = getattr(exc, "data", None)   # e.g. -32022 {"supported": [...]}
+    if data is not None:
+        payload["data"] = data
     return payload
 
 

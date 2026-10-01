@@ -25,6 +25,45 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
 
 ## [Unreleased]
 
+### Added — CoSAI MCP Security v2.0 / MCP 2026-07-28 parity with cosai-mcp P2
+
+- `mcp_armor.explicit_state` — `RequestStateSealer` (AES-256-GCM sealed MRTR
+  `requestState`, bound to audience, principal, tenant, request and expiry;
+  single-use by default with quota-bounded replay cache or a shared
+  `SpentStore`; SD-03) and `HandleRegistry` (opaque, owner-checked, quota-bounded,
+  revocable task/continuation handles; SD-01). Failures raise
+  `StateVerificationError` (T7) / `HandleError` (T2).
+- `mcp_armor.request_envelope` — `validate_request_metadata` (TN-04 header/body
+  consistency, `RequestMetadataError` -32020/-32022/-32602/-32600) and
+  `reconcile_meta` (SD-02, `MetaTrustError` T2), with the shared identity-key
+  predicate in `mcp_armor.meta_identity`, protocol helpers in
+  `mcp_armor.mcp_protocol`, and W3C trace-context rules in `mcp_armor.tracecontext`.
+- `EnvelopeEngine` — opt-in via `T7.enforce_request_envelope` (default false;
+  `T7.allowed_meta_keys` for strict mode). Runs after T1/T7/T2 (so it cannot
+  reveal tools T2 hides); legacy session requests without 2026-07-28 signals
+  pass unchanged. Tool schemas are learned from observed `tools/list`
+  responses; a modern `tools/call` before that is rejected. Header checks are
+  HTTP-only: `wrap_dispatcher` enforces `_meta` reconciliation only, and the
+  FastMCP per-tool hook / `@guard.protect` cannot see `_meta` (startup
+  warnings name the gap).
+- `MCPRequest.raw_header_pairs` — ArmorMiddleware passes the raw ASGI header
+  list so duplicated routing headers are detected.
+- ArmorMiddleware returns HTTP 400 for envelope rejections (spec), with the
+  supported-version list on -32022; `to_jsonrpc_error` includes `data`.
+
+### Security — fixed
+- T3 / envelope tool-schema learning: schemas from an observed `tools/list` are
+  now committed by `CoSAIGuard._run_response` only after the whole response
+  chain (T11 allowlist/signature, T6, …) accepted the manifest, and only for a
+  genuine `tools/list` round trip. Previously `ValidationEngine.on_response`
+  registered (first-write-wins) from any result with a top-level `tools` key —
+  including a manifest T11 then rejected — which could pin a permissive schema
+  process-wide. Code calling `ValidationEngine.on_response` directly to seed
+  schemas must use `guard.register_tool_schemas()` or the guard round trip.
+
+Not yet: stateless (session-less) MCP 2026-07-28 requests through
+ArmorMiddleware/sidecar — they still require `Mcp-Session-Id`.
+
 ### Security — fixed (2026-07-17 three-layer audit remediation)
 
 Three-layer review (mechanical scanners + Opus 4.8 core audit + Fable 5 sidecar/crypto

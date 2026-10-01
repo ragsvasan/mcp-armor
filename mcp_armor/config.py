@@ -60,7 +60,9 @@ _KNOWN_T6 = frozenset(
         "typosquat_distance",
     }
 )
-_KNOWN_T7 = frozenset({"enabled", "require_initialized_handshake"})
+_KNOWN_T7 = frozenset(
+    {"enabled", "require_initialized_handshake", "enforce_request_envelope", "allowed_meta_keys"}
+)
 _KNOWN_T8 = frozenset({"enabled", "allow_public_bind", "block_rfc1918", "bind_host", "bind_port"})
 _KNOWN_T9 = frozenset({"enabled", "max_output_length", "strip_injection_patterns"})
 _KNOWN_T10 = frozenset(
@@ -237,6 +239,15 @@ class T7Config:
     #     follow-up request to a different worker. Single-worker / sticky-session
     #     deployments are unaffected.
     require_initialized_handshake: bool = False
+    # CoSAI v2.0 TN-04 / SD-02 (opt-in, default False): EnvelopeEngine reconciles
+    # `_meta` identity/role claims against the authenticated principal and
+    # enforces MCP 2026-07-28 header/body consistency. Off by default because
+    # the name-based `_meta` check can reject benign vendor keys that contain an
+    # identity word (list those in allowed_meta_keys).
+    enforce_request_envelope: bool = False
+    # Strict mode: when set, any top-level `_meta` key outside this list (and
+    # the reserved protocol / trace-context keys) is rejected.
+    allowed_meta_keys: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -425,7 +436,13 @@ def load_config(path: str | Path) -> ArmorConfig:
     t7_raw = _t("T7")
     t7 = (
         T7Config(
-            require_initialized_handshake=bool(t7_raw.get("require_initialized_handshake", False))
+            require_initialized_handshake=bool(t7_raw.get("require_initialized_handshake", False)),
+            enforce_request_envelope=bool(t7_raw.get("enforce_request_envelope", False)),
+            allowed_meta_keys=(
+                tuple(str(k) for k in t7_raw["allowed_meta_keys"])
+                if t7_raw.get("allowed_meta_keys") is not None
+                else None
+            ),
         )
         if t7_raw is not None
         else None

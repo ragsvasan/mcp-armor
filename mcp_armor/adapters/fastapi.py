@@ -36,6 +36,9 @@ _OPAQUE_MESSAGES: dict[int, str] = {
     -32010: "Resource limit exceeded",  # ResourceExceededError (T10)
     -32011: "Supply chain error",  # SupplyChainError (T11)
     -32602: "Validation error",  # ValidationError (T3, standard invalid params)
+    -32020: "Header mismatch",  # RequestMetadataError (MCP 2026-07-28 TN-04)
+    -32022: "Unsupported protocol version",  # RequestMetadataError
+    -32600: "Invalid Request",  # RequestMetadataError (malformed envelope)
 }
 
 # Body size cap enforced during buffering — before deserialization (FIX-4)
@@ -363,6 +366,10 @@ class ArmorMiddleware:
                     headers=raw_headers,
                     url_query_params=url_query_params,
                     transport="http",
+                    header_pairs=tuple(
+                        (k.decode("latin-1"), v.decode("latin-1"))
+                        for k, v in scope.get("headers", [])
+                    ),
                 )
                 ctx = await self._guard._run_request(ctx, req)
                 set_context(ctx)
@@ -383,6 +390,20 @@ class ArmorMiddleware:
 
                 if isinstance(exc, ResourceExceededError):
                     await _send_rate_limited(send, request_id)
+                    return
+                from ..request_envelope import RequestMetadataError
+
+                if isinstance(exc, RequestMetadataError):
+                    # MCP 2026-07-28: envelope rejections are HTTP 400; -32022
+                    # carries the supported versions so the client can retry.
+                    await _send_error(
+                        send,
+                        request_id,
+                        exc.json_rpc_code,
+                        _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Request rejected"),
+                        status=400,
+                        data=exc.data if exc.json_rpc_code == -32022 else None,
+                    )
                     return
                 client_msg = _OPAQUE_MESSAGES.get(exc.json_rpc_code, "Request rejected")
                 await _send_error(send, request_id, exc.json_rpc_code, client_msg)
@@ -583,19 +604,25 @@ def _parse_qs(query_string: str) -> dict[str, str]:
     return result
 
 
-async def _send_error(send: Send, request_id: Any, code: int, message: str) -> None:
-    """Send a JSON-RPC 2.0 error response (HTTP 200 per JSON-RPC spec)."""
-    body = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": code, "message": message},
-        }
-    ).encode()
+async def _send_error(
+    send: Send,
+    request_id: Any,
+    code: int,
+    message: str,
+    *,
+    status: int = 200,
+    data: Any = None,
+) -> None:
+    """Send a JSON-RPC 2.0 error response (HTTP 200 per JSON-RPC spec unless
+    the MCP transport mandates otherwise, e.g. 400 for envelope errors)."""
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    body = json.dumps({"jsonrpc": "2.0", "id": request_id, "error": error}).encode()
     await send(
         {
             "type": "http.response.start",
-            "status": 200,
+            "status": status,
             "headers": [
                 (b"content-type", b"application/json"),
                 (b"content-length", str(len(body)).encode()),
