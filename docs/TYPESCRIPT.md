@@ -120,6 +120,11 @@ server (and on every response before it returns to the client):
 | T11 Supply chain | Per session |
 | T12 Audit log | Every request + response, in sidecar |
 
+> **MCP 2026-07-28 stateless servers:** set `threats.T7.allow_stateless_requests:
+> true` (with `enforce_request_envelope: true`). Session-less requests carrying
+> `_meta` protocolVersion are then guarded per request; "Per session" rows above
+> (T6, T10, T11) apply per request for that traffic.
+
 > If your upstream server handles auth/authz natively, disable T1/T2 in
 > `cosai.yaml` (`threats.T1.enabled: false`, `threats.T2.enabled: false`) so the
 > sidecar does not double-enforce. The remaining engines (T3–T12) still run.

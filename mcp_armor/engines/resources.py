@@ -18,16 +18,26 @@ log = logging.getLogger(__name__)
 
 
 def _json_depth(obj: Any, current: int = 0) -> int:
-    """Return the maximum nesting depth of a JSON-like Python object."""
-    if isinstance(obj, dict):
-        if not obj:
-            return current
-        return max(_json_depth(v, current + 1) for v in obj.values())
-    if isinstance(obj, list):
-        if not obj:
-            return current
-        return max(_json_depth(v, current + 1) for v in obj)
-    return current
+    """Return the maximum nesting depth of a JSON-like Python object.
+
+    Iterative (explicit stack) so arbitrarily deep values — e.g. a decoded
+    JSON-in-string argument — yield a depth instead of a RecursionError."""
+    best = current
+    stack: list[tuple[Any, int]] = [(obj, current)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Any = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            best = max(best, depth)
+            continue
+        if not node:
+            best = max(best, depth)
+            continue
+        stack.extend((child, depth + 1) for child in children)
+    return best
 
 
 class ResourceEngine:
@@ -200,7 +210,13 @@ class ResourceEngine:
         # T10-003: reject deeply-nested argument objects (JSON depth bomb).
         args = req.params.get("arguments")
         if args is not None:
+            from ..types import decoded_json_string_arguments
+
             depth = _json_depth(args)
+            # JSON-in-string arguments are decoded by the server (FastMCP) — a
+            # depth-1 string can carry a deep object; count it as decoded.
+            for decoded in decoded_json_string_arguments(args).values():
+                depth = max(depth, 1 + _json_depth(decoded))
             if depth > self._max_arg_depth:
                 raise ResourceExceededError(
                     f"Tool argument nesting depth {depth} exceeds limit "

@@ -36,7 +36,7 @@ from .engines.supply_chain import SupplyChainEngine
 from .engines.trust import TrustEngine
 from .engines.validation import ValidationEngine
 from .exceptions import CoSAIException
-from .types import MCPRequest, MCPResponse
+from .types import MCPRequest, MCPResponse, jsonable_arguments, materialize_iterators
 
 log = logging.getLogger(__name__)
 
@@ -62,8 +62,47 @@ class CoSAIGuard:
     tuning — dry_run disables all enforcement.
     """
 
-    def __init__(self, engines: list[ProtectionEngine], dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        engines: list[ProtectionEngine],
+        dry_run: bool = False,
+        *,
+        allow_stateless: bool = False,
+    ) -> None:
         self._engines = engines
+        if allow_stateless:
+            # MCP 2026-07-28 stateless mode: per-request _meta is the identity and
+            # version carrier, so the envelope checks are mandatory (dec_49b309c676).
+            if not any(isinstance(e, EnvelopeEngine) for e in engines):
+                raise ValueError(
+                    "allow_stateless=True requires an EnvelopeEngine "
+                    "(T7.enforce_request_envelope: true)"
+                )
+            if not any(isinstance(e, SessionEngine) for e in engines):
+                # Without T7 session verification an Mcp-Session-Id is an
+                # arbitrary client string — legacy and stateless traffic could
+                # not be told apart safely.
+                raise ValueError("allow_stateless=True requires a SessionEngine (T7)")
+            per_session = [
+                type(e).__name__
+                for e in engines
+                if isinstance(e, (ResourceEngine, IntegrityEngine))
+            ]
+            if per_session:
+                log.warning(
+                    "CoSAIGuard: stateless MCP 2026-07-28 requests are enabled — %s "
+                    "keep per-SESSION state (T10 call/wall-clock budget, T6 drift "
+                    "baseline) and apply per REQUEST to session-less traffic.",
+                    ", ".join(per_session),
+                )
+            if any(isinstance(e, SessionEngine) and e.require_initialized_handshake
+                   for e in engines):
+                log.warning(
+                    "CoSAIGuard: T7.require_initialized_handshake does not apply to "
+                    "stateless MCP 2026-07-28 requests (the protocol has no "
+                    "initialize); it still governs legacy sessions."
+                )
+        self.allow_stateless = allow_stateless
         if dry_run:
             # B6: hard prod guard. dry_run disables all non-auth enforcement, so
             # shipping it to production silently neuters the middleware. Refuse to
@@ -249,7 +288,11 @@ class CoSAIGuard:
                 )
             )
 
-        return cls(engines, dry_run=cfg.dry_run)
+        return cls(
+            engines,
+            dry_run=cfg.dry_run,
+            allow_stateless=cfg.t7 is not None and cfg.t7.allow_stateless_requests,
+        )
 
     @classmethod
     def default(cls) -> CoSAIGuard:
@@ -306,8 +349,19 @@ class CoSAIGuard:
         return ctx
 
     async def close_session(self, ctx: CoSAIContext) -> None:
+        # Every engine gets its on_session_end even if an earlier one fails
+        # (e.g. an audit I/O error must not leave T10 per-session state behind);
+        # the first failure is re-raised after all have run.
+        first: Exception | None = None
         for engine in self._engines:
-            await engine.on_session_end(ctx)
+            try:
+                await engine.on_session_end(ctx)
+            except Exception as exc:
+                log.exception("on_session_end failed for %s", type(engine).__name__)
+                if first is None:
+                    first = exc
+        if first is not None:
+            raise first
 
     # -------------------------------------------------------------------------
     # Per-request hooks (called by adapters)
@@ -476,6 +530,12 @@ class CoSAIGuard:
         """
         Per-tool decorator that applies a filtered engine subset around a single tool.
 
+        Arguments are scanned through a plain-data view (models, dataclasses,
+        mappings, iterables, secrets, bytes, enums, numbers, dates, UUIDs,
+        paths, IP addresses, URLs, regex patterns). Lazy iterators are
+        materialised once and the tool receives that list. An argument of any
+        other type is rejected (ValidationError) rather than scanned by repr.
+
         threats:              limit which CoSAI categories run (e.g. ["T3", "T5"]).
                               All engines run when omitted. AuthEngine (T1) and
                               AuthzEngine (T2) always run regardless of threats= filter
@@ -533,6 +593,9 @@ class CoSAIGuard:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             @functools.wraps(fn)
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
+                # Lazy iterator arguments are materialised once: the guard
+                # scans the list and the tool receives that same list.
+                kwargs = materialize_iterators(kwargs)
                 from types import MappingProxyType
 
                 from .exceptions import AuthorizationError
@@ -547,7 +610,8 @@ class CoSAIGuard:
                     ctx = asgi_ctx
                     req = MCPRequest(
                         method="tools/call",
-                        params=MappingProxyType({"name": fn.__name__, "arguments": kwargs}),
+                        params=MappingProxyType({"name": fn.__name__,
+                                                 "arguments": jsonable_arguments(kwargs)}),
                         session_id=ctx.session_id,
                         raw_headers=MappingProxyType({}),
                         transport=ctx.transport,
@@ -560,7 +624,8 @@ class CoSAIGuard:
                     ctx = CoSAIContext.new(session_id, transport="stdio")
                     req = MCPRequest(
                         method="tools/call",
-                        params=MappingProxyType({"name": fn.__name__, "arguments": kwargs}),
+                        params=MappingProxyType({"name": fn.__name__,
+                                                 "arguments": jsonable_arguments(kwargs)}),
                         session_id=session_id,
                         raw_headers=MappingProxyType({}),
                         transport="stdio",

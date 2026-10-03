@@ -25,6 +25,10 @@ class CoSAIContext:
     # SessionEngine flips it to PENDING on `initialize` and back to ACTIVE on
     # `notifications/initialized` (only when require_initialized_handshake is on).
     handshake_phase: str = HANDSHAKE_ACTIVE
+    # MCP 2026-07-28 session-less request (one-request context; the session_id
+    # is an internal per-request id). Engines that bind state to session_id
+    # across requests (e.g. T2-004 confirmation) must bind elsewhere.
+    stateless: bool = False
 
     @classmethod
     def new(cls, session_id: str, transport: str = "http") -> CoSAIContext:

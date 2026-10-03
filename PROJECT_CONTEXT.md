@@ -78,6 +78,13 @@ match the source of truth.
 - T12 HMAC signing is required by default (`T12.require_hmac_key` true; `ARMOR_AUDIT_HMAC_KEY`
   must be set at startup). Dev opt-out: `require_hmac_key: false` or `ARMOR_AUDIT_ALLOW_UNSIGNED=1`.
 - `dry_run` refuses to construct unless `ARMOR_ALLOW_DRY_RUN=1` is set.
+- Decorator paths (`@guard.protect`, FastMCP per-tool hook) scan a plain-data
+  view of kwargs; argument types without a faithful view are rejected
+  (see `types._scan_view` for the allowlist).
+- MCP 2026-07-28 stateless requests: opt-in `T7.allow_stateless_requests`
+  (requires `T7.enforce_request_envelope`, Mnemo dec_49b309c676). Session-less
+  requests carrying `_meta` protocolVersion get a per-request context; per-session
+  T10/T6 state does not accumulate across them.
 - SIEM/SOAR export is file-tail-only today — T12 writes portable JSONL a SIEM can tail;
   no emitter ships yet.
 - Benchmarks: `benchmarks/chain_overhead.py` (Apple M5, 20k iters) — CPU scan chain

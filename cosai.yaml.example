@@ -111,6 +111,13 @@ threats:
     # enforces MCP 2026-07-28 header/body consistency (-32020 / -32022, HTTP 400).
     # enforce_request_envelope: true
     # allowed_meta_keys: ["com.example/feature"]   # strict mode: reject any other key
+    #
+    # MCP 2026-07-28 stateless clients (no initialize, no Mcp-Session-Id). Opt-in;
+    # requires enforce_request_envelope. Each session-less request is guarded on
+    # its own context: T10 budgets and the T6 drift baseline apply per request,
+    # and require_initialized_handshake does not apply to them (no initialize
+    # in 2026-07-28) — it still governs legacy sessions.
+    # allow_stateless_requests: true
 
   T8:
     enabled: true

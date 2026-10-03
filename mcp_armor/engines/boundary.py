@@ -356,8 +356,10 @@ class BoundaryEngine:
 
         if self._scan_call_args and "arguments" in fields:
             args = fields["arguments"]
-            # Recursive scan of all string values — never log the matched value
-            matched = self._scan_values(args)
+            # Recursive scan of all string values — never log the matched value.
+            # Also the JSON-in-string arguments as the server will decode them.
+            matched = self._scan_values(args) or self._scan_values(
+                fields.get("decoded_arguments", {}))
             if matched:
                 raise InjectionDetectedError(
                     f"Prompt injection pattern detected in tool call arguments "

@@ -314,6 +314,9 @@ class NetworkEngine:
             return ctx
         if "arguments" in fields:
             self._scan_args_for_ssrf(fields["arguments"])
+        if "decoded_arguments" in fields:
+            # JSON-in-string args as the server will run them (FastMCP decode).
+            self._scan_args_for_ssrf(fields["decoded_arguments"])
         if "uri" in fields:
             self._scan_args_for_ssrf(fields["uri"])
         return ctx

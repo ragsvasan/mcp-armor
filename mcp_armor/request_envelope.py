@@ -38,6 +38,7 @@ from .mcp_protocol import (
     NAME_BEARING_METHODS,
     encode_header_value,
     mcp_name_for,
+    schema_case_variant_keys,
     x_mcp_header_annotations,
     x_mcp_param_headers,
 )
@@ -287,9 +288,35 @@ def validate_request_metadata(
         if not isinstance(tool, str) or tool not in tool_schemas:
             raise RequestMetadataError(-32602, "Unknown tool", reason="unknown_tool")
         schema = tool_schemas[tool]
+        # Resolve arguments the way the server will run them: top-level
+        # JSON-in-string values are decoded by the MCP Python SDK (FastMCP), so
+        # annotations nested under them must be checked against the decoded
+        # value, never treated as "absent".
+        raw_args = params.get("arguments")
+        effective_args: Any = raw_args
+        decoded_args: Any = raw_args
+        if isinstance(raw_args, Mapping):
+            from .types import decoded_json_string_arguments
+
+            decoded = decoded_json_string_arguments(dict(raw_args))
+            decoded_args = {**raw_args, **decoded}
+            # Substitute the decoded value only where an annotation reaches
+            # THROUGH the argument (path length > 1): a string-typed annotated
+            # parameter is not decoded by the server and mirrors its raw text.
+            through = {path[0] for _, path in x_mcp_header_annotations(schema)
+                       if len(path) > 1}
+            effective_args = {**raw_args,
+                              **{k: v for k, v in decoded.items() if k in through}}
+        if (schema_case_variant_keys(schema, raw_args)
+                or schema_case_variant_keys(schema, decoded_args)):
+            # A key that is a declared property only under case folding would
+            # be bound to that property by a case-insensitive server while the
+            # header mirror reads the exact key — never consistent.
+            raise RequestMetadataError(-32602, "Invalid params",
+                                       reason="case_variant_argument")
         try:
             expected = {k.lower(): v for k, v in x_mcp_param_headers(
-                schema, params.get("arguments"), strict=True).items()}
+                schema, effective_args, strict=True).items()}
         except UnicodeEncodeError:
             raise _mismatch(HEADER_PARAM_PREFIX + "*") from None
         annotations = x_mcp_header_annotations(schema)
@@ -302,7 +329,7 @@ def validate_request_metadata(
             raw = _single(header)
             want = expected.get(header)
             if want is None:
-                if _arg_at(params.get("arguments"), path) is not None:
+                if _arg_at(effective_args, path) is not None:
                     # Present but not canonically renderable (integral float,
                     # int beyond 2^53, wrong type): the server would execute a
                     # value no intermediary could see in the header.

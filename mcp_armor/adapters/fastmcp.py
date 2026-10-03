@@ -113,8 +113,17 @@ class _GuardedToolDispatcher:
             from types import MappingProxyType
 
             from ..context import CoSAIContext, set_context
-            from ..types import MCPRequest, MCPResponse
+            from ..types import (
+                MCPRequest,
+                MCPResponse,
+                jsonable_arguments,
+                materialize_iterators,
+            )
 
+            # Convert BEFORE any context is set: a conversion failure must not
+            # leak the active context (Fix 8 parity) or skip close_session.
+            kwargs = materialize_iterators(dict(kwargs))
+            scanned_arguments = jsonable_arguments(kwargs)
             # FIX-2: use caller-supplied transport, not hardcoded "stdio"
             # Stateless signed token so SessionEngine.verify() accepts it.
             session_id = self._guard.mint_session_id(transport)
@@ -134,7 +143,8 @@ class _GuardedToolDispatcher:
             tool_name = fn.__name__
             req = MCPRequest(
                 method="tools/call",
-                params=MappingProxyType({"name": tool_name, "arguments": dict(kwargs)}),
+                params=MappingProxyType(
+                    {"name": tool_name, "arguments": scanned_arguments}),
                 session_id=session_id,
                 raw_headers=MappingProxyType({}),
                 transport=transport,  # FIX-2

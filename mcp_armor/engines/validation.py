@@ -353,6 +353,16 @@ class ValidationEngine:
                 ) from exc
             return
 
+        from ..mcp_protocol import schema_case_variant_keys
+
+        shadowed = schema_case_variant_keys(schema, arguments)
+        if shadowed:
+            raise ValidationError(
+                f"Tool {tool_name!r} argument key(s) differ from a declared property "
+                "only in letter case — rejected (a case-insensitive server would bind "
+                "them to the declared field)"
+            )
+
         if self._strict_schema:
             schema = {**schema, "additionalProperties": False}
 
@@ -387,6 +397,73 @@ class ValidationEngine:
 
     async def on_session_start(self, ctx: CoSAIContext) -> CoSAIContext:
         return ctx
+
+    def _validate_decoded_against_property(self, decoded: Any, prop_schema: Any,
+                                           root: dict[str, Any], key: str, tool_name: str,
+                                           ) -> None:
+        """The server runs the DECODED value, so it must satisfy the property
+        schema too (enum, pattern, additionalProperties, nested types…), not
+        just the raw string. Skipped for a plain ``{"type": "string"}``
+        property: FastMCP does not decode ``str`` parameters."""
+        if not isinstance(prop_schema, dict) or prop_schema.get("type") == "string":
+            return
+        try:
+            import jsonschema
+        except ImportError:
+            return
+        # Validate {key: decoded} against the ROOT schema narrowed to this one
+        # property, so root-relative $refs ("#/properties/t", "#", "#/$defs/x")
+        # resolve exactly as in the full schema.
+        sub = {**root, "properties": {key: prop_schema}, "required": []}
+        sub.pop("additionalProperties", None)
+        try:
+            jsonschema.Draft7Validator(sub).validate({key: decoded})
+        except jsonschema.ValidationError as exc:
+            raise ValidationError(
+                f"Tool {tool_name!r}: JSON-encoded argument {key!r} violates its "
+                f"schema: {exc.message}"
+            ) from exc
+        except Exception as exc:  # unresolvable $ref, invalid schema, …
+            raise ValidationError(
+                f"Tool {tool_name!r}: JSON-encoded argument {key!r} could not be "
+                "validated against its schema"
+            ) from exc
+
+    def _scan_json_in_string_arguments(self, arguments: dict[str, Any], tool_name: str
+                                       ) -> None:
+        """Scan what the server will actually execute for JSON-in-a-string args.
+
+        The official MCP Python SDK (FastMCP ``pre_parse_json``) ``json.loads``
+        a top-level string argument whose parameter is not plain ``str`` and
+        runs the decoded object. ``\\uXXXX`` escapes inside that string are
+        literal text to the injection/traversal scans but become real ``;`` /
+        ``|`` / ``../`` after decoding — so scan (and case-variant check) the
+        decoded value too. Bounded by the payload-size cap already enforced.
+        """
+        from ..mcp_protocol import schema_case_variant_keys
+        from ..types import decoded_json_string_arguments
+
+        schema = self._tool_schemas.get(tool_name) or {}
+        props = schema.get("properties") if isinstance(schema, dict) else None
+        for key, decoded in decoded_json_string_arguments(arguments).items():
+            # leaf_key=key keeps the per-field prose exemption (BUG-46) for the
+            # decoded value exactly as for the raw string.
+            self._scan_all_strings(decoded, f"arguments.{key}", leaf_key=key)
+            prop_schema = props.get(key) if isinstance(props, dict) else None
+            if self._strict_schema:
+                # Schema enforcement of the decoded value follows T3-005: only
+                # under strict_schema (the scans above always run).
+                self._validate_decoded_against_property(decoded, prop_schema, schema, key,
+                                                        tool_name)
+            if prop_schema is not None and schema_case_variant_keys(
+                    {"properties": {"_": prop_schema}} | {"$defs": schema.get("$defs", {}),
+                                                          "definitions":
+                                                          schema.get("definitions", {})},
+                    decoded):
+                raise ValidationError(
+                    f"Tool {tool_name!r}: JSON-encoded argument {key!r} has keys that "
+                    "differ from declared properties only in letter case"
+                )
 
     async def on_request(self, ctx: CoSAIContext, req: MCPRequest) -> CoSAIContext:
         # F2 fix: validate every content-bearing method (tools/call,
@@ -427,6 +504,7 @@ class ValidationEngine:
         # Covers arguments AND the resources/* `uri` field (F2).
         if arguments is not None:
             self._scan_all_strings(arguments, "arguments")
+            self._scan_json_in_string_arguments(arguments, tool_name)
         uri = fields.get("uri")
         if uri is not None:
             if not isinstance(uri, str):

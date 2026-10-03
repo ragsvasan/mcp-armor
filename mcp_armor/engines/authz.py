@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import secrets
 import threading
@@ -40,6 +42,8 @@ _AUTHZ_PASSTHROUGH_METHODS: frozenset[str] = frozenset(
     {
         # Lifecycle / handshake
         "initialize",
+        # MCP 2026-07-28 stateless discovery (replaces initialize; no content)
+        "server/discover",
         "notifications/initialized",
         "ping",
         # Capability discovery (read-only listings)
@@ -94,9 +98,23 @@ class _TokenStore:
     In multi-worker deployments, back this with a shared session store (Redis/DB).
     """
 
-    def __init__(self, ttl_seconds: int) -> None:
+    def __init__(
+        self,
+        ttl_seconds: int,
+        max_entries: int = 10_000,
+        max_per_owner: int = 64,
+        max_per_principal: int = 256,
+    ) -> None:
         self._ttl = ttl_seconds
-        self._entries: dict[str, tuple[str, float]] = {}  # key → (token, expiry_mono)
+        self._max_entries = max_entries
+        # Two quotas so no caller can fill the global store and starve others'
+        # confirmations: per owner (a legacy session, or a stateless principal)
+        # and per principal across all of its sessions (opening many sessions
+        # does not multiply the allowance; unauthenticated callers share one).
+        self._max_per_owner = max_per_owner
+        self._max_per_principal = max_per_principal
+        # key → (token, expiry_mono, owner, principal)
+        self._entries: dict[str, tuple[str, float, str, str]] = {}
         self._lock = threading.Lock()
         # Fixed-length dummy for constant-time compare when no entry / expired entry exists.
         # Must be the same length as issued tokens (token_urlsafe(32) → 43 chars).
@@ -107,7 +125,9 @@ class _TokenStore:
         """Bind the token to both session and tool — prevents cross-tool replay."""
         return f"{session_id}::{tool_name}"
 
-    def issue(self, session_id: str, tool_name: str) -> str:
+    def issue(
+        self, session_id: str, tool_name: str, *, owner: str = "", principal: str = ""
+    ) -> str:
         """
         Generate a new confirmation token for (session_id, tool_name).
 
@@ -120,10 +140,27 @@ class _TokenStore:
         with self._lock:
             # Lazy eviction — amortised O(1) per call
             now = time.monotonic()
-            expired_keys = [k for k, (_, exp) in self._entries.items() if exp <= now]
+            expired_keys = [k for k, e in self._entries.items() if e[1] <= now]
             for k in expired_keys:
                 del self._entries[k]
-            self._entries[key] = (token, expiry)
+            # Bindings include an arguments digest, so distinct argument sets
+            # create distinct pending entries — bound them and fail closed.
+            owner = owner or session_id
+            if key not in self._entries and (
+                sum(1 for e in self._entries.values() if e[2] == owner) >= self._max_per_owner
+                or sum(1 for e in self._entries.values() if e[3] == principal)
+                >= self._max_per_principal
+            ):
+                raise AuthorizationError(
+                    "Too many pending destructive-action confirmations for this "
+                    "caller — try again after they expire (T2-004)"
+                )
+            if key not in self._entries and len(self._entries) >= self._max_entries:
+                raise AuthorizationError(
+                    "Too many pending destructive-action confirmations — try again "
+                    "after existing confirmations expire (T2-004)"
+                )
+            self._entries[key] = (token, expiry, owner, principal)
         return token
 
     def consume(self, session_id: str, tool_name: str, presented_token: str) -> bool:
@@ -140,7 +177,7 @@ class _TokenStore:
             if entry is None:
                 secrets.compare_digest(presented_token, self._dummy)
                 return False
-            stored_token, expiry = entry
+            stored_token, expiry = entry[0], entry[1]
             if time.monotonic() > expiry:
                 del self._entries[key]
                 secrets.compare_digest(presented_token, self._dummy)
@@ -229,7 +266,11 @@ class AuthzEngine:
         # tools/call. resources/read & prompts/get reach the upstream server
         # and resolve URIs / templates — they must be authorized too.
         if req.method not in CONTENT_BEARING_METHODS:
-            if req.method in _AUTHZ_PASSTHROUGH_METHODS:
+            if req.method in _AUTHZ_PASSTHROUGH_METHODS and (
+                req.method != "server/discover" or ctx.stateless
+            ):
+                # server/discover is the 2026-07-28 stateless entry point only;
+                # on legacy sessions it stays under default-deny.
                 return ctx
             # Fail closed: an unknown method must not bypass the authz gate.
             if self._default_deny:
@@ -241,7 +282,17 @@ class AuthzEngine:
 
         # Resource subject: tools/call & prompts/get use 'name'; resources/*
         # are keyed by their 'uri'. Policies may be registered under either.
-        tool_name = str(req.params.get("name", "") or req.params.get("uri", ""))
+        # tools/call and prompts/get are keyed ONLY by an exact string "name";
+        # resources/* only by "uri". Never fall back across them: a request
+        # whose real name is hidden from this parser (e.g. "NAME" for a
+        # case-insensitive upstream) must not be authorized under its "uri".
+        key_field = "uri" if req.method.startswith("resources/") else "name"
+        raw_subject = req.params.get(key_field)
+        if not isinstance(raw_subject, str) or not raw_subject:
+            raise AuthorizationError(
+                f"'{req.method}' requires a string '{key_field}' — denied (T2-001)"
+            )
+        tool_name = raw_subject
         policy = self._policies.get(tool_name)
 
         # Default deny — tool has no policy entry
@@ -289,8 +340,19 @@ class AuthzEngine:
         if policy.destructive:
             args = req.params.get("arguments", {})
             confirm_token = args.get("_confirm_token") if isinstance(args, dict) else None
+            binding = self._confirm_binding(ctx, tool_name, args)
             if not confirm_token:
-                token = self._token_store.issue(ctx.session_id, tool_name)
+                owner = (
+                    json.dumps(["stateless", ctx.user_id, ctx.tenant_id])
+                    if ctx.stateless
+                    else json.dumps(["session", ctx.session_id])
+                )
+                principal = (
+                    json.dumps([ctx.user_id, ctx.tenant_id]) if ctx.user_id else "anonymous"
+                )
+                token = self._token_store.issue(
+                    binding, tool_name, owner=owner, principal=principal
+                )
                 if self._echo_confirm_token:
                     raise AuthorizationError(
                         f"Tool '{tool_name}' is destructive and requires explicit "
@@ -314,13 +376,47 @@ class AuthzEngine:
                     f"'_confirm_token' obtained out-of-band. The token is NOT "
                     f"returned in this response by design."
                 )
-            if not self._token_store.consume(ctx.session_id, tool_name, str(confirm_token)):
+            if not self._token_store.consume(binding, tool_name, str(confirm_token)):
                 raise AuthorizationError(
                     f"Tool '{tool_name}': _confirm_token is invalid or expired — "
                     "destructive action denied (T2-004)"
                 )
 
         return ctx
+
+    @staticmethod
+    def _confirm_binding(ctx: CoSAIContext, tool_name: str, args: object) -> str:
+        """What a destructive-tool confirmation token is bound to.
+
+        Legacy sessions: the session id. Stateless MCP 2026-07-28 requests get a
+        fresh internal id per request, so the token is bound instead to the
+        authenticated principal + tenant + the exact arguments (minus the token)
+        — a confirmed token cannot be replayed by another principal or with
+        different, more destructive arguments. Without an authenticated
+        principal there is nothing durable to bind to: fail closed.
+        """
+        clean = (
+            {k: v for k, v in args.items() if k != "_confirm_token"}
+            if isinstance(args, dict)
+            else args
+        )
+        digest = hashlib.sha256(
+            json.dumps(clean, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        # JSON arrays with an explicit kind tag: a legacy binding can never equal
+        # a stateless one (even for an attacker-chosen session id), and both bind
+        # the confirmed arguments so an approval cannot be reused for others.
+        if not ctx.stateless:
+            return json.dumps(["session", ctx.session_id, digest], separators=(",", ":"))
+        if not ctx.user_id:
+            raise AuthorizationError(
+                f"Tool '{tool_name}' is destructive: stateless requests require an "
+                "authenticated principal for the two-stage confirmation (T2-004)"
+            )
+        # Unambiguous (no delimiter collisions between claim values) and
+        # distinguishes tenant None from "".
+        return json.dumps(["stateless", ctx.user_id, ctx.tenant_id, digest],
+                          separators=(",", ":"))
 
     def filter_tools_list(self, tool_names: list[str], ctx: CoSAIContext) -> list[str]:
         """Return only the tool names the caller is allowed to see (T2-004b).

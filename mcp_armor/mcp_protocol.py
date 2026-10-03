@@ -245,3 +245,86 @@ def x_mcp_header_annotations(input_schema: Any) -> list[tuple[str, tuple[str, ..
             continue
         valid.append((name, path))
     return valid
+
+
+_MAX_SCHEMA_CONTAINERS = 100_000
+
+
+def _declared_property_mappings(schema: Any) -> tuple[list[frozenset[str]], bool]:
+    """The name sets of every ``properties`` mapping anywhere in the schema
+    (any keyword: allOf/anyOf/oneOf/if/then/else/not, $defs/definitions,
+    items/prefixItems, additionalProperties, dependencies, ...), and whether
+    the walk was truncated (only containers are counted)."""
+    mappings: list[frozenset[str]] = []
+    stack: list[Any] = [schema]
+    seen = 0
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, (dict, list)):
+            continue
+        seen += 1
+        if seen > _MAX_SCHEMA_CONTAINERS:
+            return mappings, True
+        if isinstance(node, dict):
+            props = node.get("properties")
+            if isinstance(props, dict):
+                mappings.append(frozenset(k for k in props if isinstance(k, str)))
+            stack.extend(node.values())
+        else:
+            stack.extend(node)
+    return mappings, False
+
+
+def schema_case_variant_keys(schema: Any, value: Any) -> list[str]:
+    """Argument keys (at ANY depth) that a case-insensitive decoder (Go
+    encoding/json, ASP.NET) could bind to a different declared property than
+    the one the guard's exact-key view sees — e.g. ``REGION`` when ``region``
+    is declared. JSON Schema validation and x-mcp-header mirroring would treat
+    such a key as an unknown extra while the server runs it.
+
+    Structure-agnostic and conservative (no $ref/composition resolution, no
+    depth/array caps — the request body is size-capped). Declared names are
+    grouped by case fold:
+      * one spelling in the group  → any other spelling is flagged;
+      * several spellings declared together in every ``properties`` mapping
+        that declares any of them (``a``/``A``) → the exact spellings pass,
+        others are flagged;
+      * several spellings declared in different mappings → every key of the
+        group is flagged (the guard cannot tell which field it binds to).
+    A schema too large to walk fails closed: every key is flagged.
+    """
+    mappings, truncated = _declared_property_mappings(schema)
+    if truncated:
+        return ["<schema-too-large>"] if value not in (None, {}, []) else []
+    groups: dict[str, set[str]] = {}
+    for names in mappings:
+        for n in names:
+            groups.setdefault(n.casefold(), set()).add(n)
+    if not groups:
+        return []
+    # Co-declared only if EVERY mapping that declares any spelling of the fold
+    # declares all of them — otherwise some object binds a variant elsewhere.
+    codeclared = {
+        fold for fold, spellings in groups.items()
+        if len(spellings) > 1 and all(spellings <= m for m in mappings if m & spellings)
+    }
+    found: list[str] = []
+    stack: list[tuple[str, Any]] = [("", value)]
+    while stack:
+        path, node = stack.pop()
+        if isinstance(node, dict):
+            for key, sub in node.items():
+                if not isinstance(key, str):
+                    continue
+                spellings = groups.get(key.casefold())
+                if spellings is not None:
+                    if len(spellings) == 1 or key.casefold() in codeclared:
+                        bad = key not in spellings
+                    else:
+                        bad = True
+                    if bad:
+                        found.append(f"{path}/{key}")
+                stack.append((f"{path}/{key}", sub))
+        elif isinstance(node, list):
+            stack.extend((f"{path}/{i}", item) for i, item in enumerate(node))
+    return sorted(found)

@@ -275,8 +275,12 @@ class ArmorMiddleware:
 
         # Parse JSON — reject non-dict shapes (batch arrays, scalars) before .get() calls
         try:
-            parsed: Any = json.loads(raw_body) if raw_body else {}
-        except json.JSONDecodeError:
+            parsed: Any = _strict_json_loads(raw_body) if raw_body else {}
+            _check_request_envelope_keys(parsed)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            # Includes duplicate keys and non-finite numbers: the raw bytes are
+            # forwarded upstream, so the guard must never check a different
+            # reading of them than a first-wins / strict upstream parser makes.
             await _send_error(send, None, -32700, "Parse error: invalid JSON")
             return
 
@@ -292,6 +296,7 @@ class ArmorMiddleware:
 
         # Session resolution (MCP spec §3.4)
         method = payload.get("method", "")
+        is_stateless = False
         if method == "initialize":
             # Server owns session identity — a stateless HMAC-signed token
             # (T7-001). Self-verifying, so it survives horizontal scaling and
@@ -302,8 +307,15 @@ class ArmorMiddleware:
             session_id = raw_headers.get(_SESSION_HEADER_STR, "")
             is_new_session = False
             if not session_id:
-                await _send_error(send, request_id, -32600, "Missing Mcp-Session-Id header")
-                return
+                if self._guard.allow_stateless and _carries_protocol_version(payload):
+                    # MCP 2026-07-28 stateless request (dec_49b309c676): guard it on
+                    # a fresh one-request context — opened and closed around this
+                    # request, never persisted, and no session id is issued.
+                    session_id = self._guard.mint_session_id("http")
+                    is_stateless = True
+                else:
+                    await _send_error(send, request_id, -32600, "Missing Mcp-Session-Id header")
+                    return
 
         # F4 / F7 fix: an MCP session spans many HTTP requests. Recreating a
         # fresh CoSAIContext.new() per request reset tool_manifest_hash (so
@@ -312,8 +324,12 @@ class ArmorMiddleware:
         # findings / audit_parent continuity. We now load the persisted,
         # evolving context for an existing session and only create a new one
         # at `initialize`.
-        if is_new_session:
+        if is_new_session or is_stateless:
             ctx = CoSAIContext.new(session_id, transport="http")
+            if is_stateless:
+                from dataclasses import replace as _replace
+
+                ctx = _replace(ctx, stateless=True)
         else:
             stored = self._active_sessions.get(session_id)
             if stored is not None:
@@ -350,15 +366,24 @@ class ArmorMiddleware:
         from ..guard import _active_ctx as _armor_active_ctx
 
         _armor_ctx_token = _armor_active_ctx.set(ctx)
+        stateless_opened = False
         try:
             # FIX-6: catch all exceptions — unexpected errors must not leak tracebacks
             try:
-                if is_new_session:
+                if is_stateless:
+                    # Set BEFORE opening: if an engine's on_session_start raises
+                    # part-way, the engines that did start still get closed.
+                    stateless_opened = True
+                if is_new_session or is_stateless:
                     ctx = await self._guard.open_session(ctx)
                     set_context(ctx)
                     _armor_active_ctx.set(ctx)
-                    # FIX-1: track for shutdown drain
-                    self._active_sessions[session_id] = ctx
+                    if is_new_session:
+                        # FIX-1: track for shutdown drain
+                        self._active_sessions[session_id] = ctx
+                    # A stateless request is a one-request session: opened here,
+                    # closed in the finally below (T12 audit bracket, per-session
+                    # engine state released), never persisted.
 
                 req = MCPRequest.from_dict(
                     payload,
@@ -496,9 +521,22 @@ class ArmorMiddleware:
                 resp_dict: dict[str, Any] = {}
             else:
                 try:
-                    parsed_resp: Any = json.loads(resp_raw)
-                except json.JSONDecodeError:
+                    # Strict like the request side: the raw bytes are forwarded to
+                    # the client, so a duplicate-key body must not scan clean under
+                    # Python's last-wins reading while a first-wins client reads
+                    # the other copy.
+                    parsed_resp: Any = _strict_json_loads(resp_raw)
+                    _check_response_envelope_keys(parsed_resp)
+                except (json.JSONDecodeError, ValueError, RecursionError):
                     parsed_resp = None
+                    if not (self._response_scan_active or method == "tools/list"):
+                        # Nothing inspects the content and the raw bytes are
+                        # forwarded either way: give non-scanning engines (e.g.
+                        # T12 audit) the lenient reading instead of {}.
+                        try:
+                            parsed_resp = json.loads(resp_raw)
+                        except (json.JSONDecodeError, ValueError, RecursionError):
+                            parsed_resp = None
                 if isinstance(parsed_resp, dict):
                     resp_dict = parsed_resp
                 elif self._response_scan_active or method == "tools/list":
@@ -580,6 +618,11 @@ class ArmorMiddleware:
                 await send(response_start_msg)
             await send({"type": "http.response.body", "body": resp_raw, "more_body": False})
         finally:
+            if stateless_opened:
+                try:
+                    await self._guard.close_session(ctx)
+                except Exception as exc:
+                    log.error("Error closing stateless request context: %s", exc)
             # Fix 8: reset ContextVar so no ctx bleeds into background tasks
             # or the next request handled on the same asyncio Task.
             _armor_active_ctx.reset(_armor_ctx_token)
@@ -602,6 +645,159 @@ def _parse_qs(query_string: str) -> dict[str, str]:
         elif part:
             result[unquote_plus(part)] = ""
     return result
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON object key")
+        out[key] = value
+    return out
+
+
+def _reject_casefold_collisions(*objs: Any) -> None:
+    """Keys that collide under Unicode case folding, in the objects a
+    case-insensitive upstream decoder maps onto struct fields (Go
+    encoding/json, ASP.NET): "Name"/"name", "argumentſ"/"arguments". Checked
+    only on envelope objects — free-form data (schemas, results, env maps) may
+    legitimately carry case-variant siblings."""
+    for obj in objs:
+        if isinstance(obj, dict):
+            folded = {k.casefold() for k in obj}
+            if len(folded) != len(obj):
+                raise ValueError("JSON object keys collide under case folding")
+
+
+# Protocol field names at the JSON-RPC envelope and params level. A key that
+# equals one of these only under case folding ("NAME", "ARGUMENTS", "_META",
+# "argumentſ") is read by case-insensitive upstream decoders as the real field
+# while the guard sees it as absent — reject it.
+_ENVELOPE_FIELDS = frozenset({"jsonrpc", "id", "method", "params", "result", "error"})
+_PARAMS_FIELDS = frozenset({
+    "name", "arguments", "uri", "_meta", "cursor", "requestState", "inputResponses",
+    "task", "taskId", "protocolVersion", "capabilities", "clientInfo", "level", "ref",
+    "argument", "context", "messages",
+})
+_META_FIELDS = frozenset({"progressToken"})
+# Result-level protocol fields the guard keys on (tools/list manifest for
+# T11/T6/T4 + scope filter, tool results for T4/T5/T9). Values are not
+# recursed into — schemas and structuredContent may carry any keys.
+_RESULT_FIELDS = frozenset({
+    "tools", "content", "isError", "structuredContent", "contents", "resources",
+    "resourceTemplates", "prompts", "messages", "nextCursor",
+    # 2026-07-28 result fields
+    "_meta", "resultType", "inputRequests", "requestState", "cacheScope", "ttlMs",
+    "completion", "task",
+})
+_ERROR_FIELDS = frozenset({"code", "message", "data"})
+# Fields of list elements the guard keys on (manifest scans, content scans).
+_COMMON_ELEMENT_FIELDS = frozenset({
+    "title", "description", "size", "icons", "annotations", "_meta", "audience",
+    "priority",
+})
+_CONTENT_FIELDS = frozenset({
+    "type", "text", "data", "mimeType", "resource", "uri", "name",
+}) | _COMMON_ELEMENT_FIELDS
+_RESOURCE_CONTENTS_FIELDS = frozenset({"uri", "text", "blob", "mimeType"}) | \
+    _COMMON_ELEMENT_FIELDS
+_RESULT_ELEMENT_FIELDS: dict[str, frozenset[str]] = {
+    "tools": frozenset({"name", "inputSchema", "outputSchema"}) | _COMMON_ELEMENT_FIELDS,
+    "content": _CONTENT_FIELDS,
+    "contents": _RESOURCE_CONTENTS_FIELDS,
+    "messages": frozenset({"role", "content"}),
+    "resources": frozenset({"uri", "name", "mimeType"}) | _COMMON_ELEMENT_FIELDS,
+    "prompts": frozenset({"name", "arguments"}) | _COMMON_ELEMENT_FIELDS,
+}
+
+
+def _reject_case_variant_fields(obj: Any, fields: frozenset[str]) -> None:
+    if not isinstance(obj, dict):
+        return
+    canonical = {f.casefold(): f for f in fields}
+    for key in obj:
+        exact = canonical.get(key.casefold())
+        if exact is not None and key != exact:
+            raise ValueError("case-variant protocol field name")
+
+
+def _check_request_envelope_keys(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        return
+    params = payload.get("params")
+    p = params if isinstance(params, dict) else {}
+    _reject_casefold_collisions(payload, params, p.get("arguments"), p.get("_meta"))
+    _reject_case_variant_fields(payload, _ENVELOPE_FIELDS)
+    _reject_case_variant_fields(params, _PARAMS_FIELDS)
+    _reject_case_variant_fields(p.get("_meta"), _META_FIELDS)
+
+
+def _check_response_envelope_keys(body: Any) -> None:
+    if isinstance(body, dict):
+        _reject_casefold_collisions(body, body.get("result"), body.get("error"))
+        _reject_case_variant_fields(body, _ENVELOPE_FIELDS)
+        result = body.get("result")
+        _reject_case_variant_fields(result, _RESULT_FIELDS)
+        _reject_case_variant_fields(body.get("error"), _ERROR_FIELDS)
+        if isinstance(result, dict):
+            for list_field, fields in _RESULT_ELEMENT_FIELDS.items():
+                elements = result.get(list_field)
+                if isinstance(elements, list):
+                    for element in elements:
+                        _reject_case_variant_fields(element, fields)
+                        if not isinstance(element, dict):
+                            continue
+                        # One level deeper where the guard reads content:
+                        # embedded resources and prompt-message content.
+                        if list_field == "content":
+                            _reject_case_variant_fields(element.get("resource"),
+                                                        _RESOURCE_CONTENTS_FIELDS)
+                        elif list_field == "messages":
+                            inner = element.get("content")
+                            for part in inner if isinstance(inner, list) else [inner]:
+                                _reject_case_variant_fields(part, _CONTENT_FIELDS)
+                                if isinstance(part, dict):
+                                    _reject_case_variant_fields(
+                                        part.get("resource"), _RESOURCE_CONTENTS_FIELDS)
+
+
+def _reject_constant(name: str) -> Any:
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if value in (float("inf"), float("-inf")):
+        raise ValueError("JSON number out of range")
+    return value
+
+
+def _strict_json_loads(raw: bytes) -> Any:
+    """Parse a request body the way the guard must see it: duplicate object
+    keys, NaN/Infinity and out-of-range numbers are errors. Callers also run
+    the envelope case-fold check (_check_request_envelope_keys /
+    _check_response_envelope_keys) against case-insensitive upstream decoders
+    such as Go's encoding/json. ArmorMiddleware
+    forwards the ORIGINAL bytes upstream; with Python's last-wins duplicate-key
+    semantics a first-wins upstream would execute a different name/arguments
+    than the guard authorized, digested for T2-004, or scanned."""
+    return json.loads(
+        raw,
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_constant,
+        parse_float=_finite_float,
+    )
+
+
+def _carries_protocol_version(payload: dict[str, Any]) -> bool:
+    """True if a JSON-RPC request carries the MCP 2026-07-28 per-request
+    protocol version in params._meta (the stateless-era signal). Its value is
+    validated by EnvelopeEngine (unsupported → -32022)."""
+    from ..mcp_protocol import META_PROTOCOL_VERSION
+
+    params = payload.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    return isinstance(meta, dict) and isinstance(meta.get(META_PROTOCOL_VERSION), str)
 
 
 async def _send_error(

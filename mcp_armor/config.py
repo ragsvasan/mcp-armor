@@ -61,7 +61,13 @@ _KNOWN_T6 = frozenset(
     }
 )
 _KNOWN_T7 = frozenset(
-    {"enabled", "require_initialized_handshake", "enforce_request_envelope", "allowed_meta_keys"}
+    {
+        "enabled",
+        "require_initialized_handshake",
+        "enforce_request_envelope",
+        "allowed_meta_keys",
+        "allow_stateless_requests",
+    }
 )
 _KNOWN_T8 = frozenset({"enabled", "allow_public_bind", "block_rfc1918", "bind_host", "bind_port"})
 _KNOWN_T9 = frozenset({"enabled", "max_output_length", "strip_injection_patterns"})
@@ -248,6 +254,15 @@ class T7Config:
     # Strict mode: when set, any top-level `_meta` key outside this list (and
     # the reserved protocol / trace-context keys) is rejected.
     allowed_meta_keys: tuple[str, ...] | None = None
+    # MCP 2026-07-28 removes protocol sessions. Opt-in (default False): admit a
+    # request without Mcp-Session-Id when its params._meta carries a protocol
+    # version, guarding it on a fresh per-request context. Requires
+    # enforce_request_envelope (header/body + _meta identity checks are what make
+    # a session-less request safe to route). Per-session engines (T10 budgets,
+    # T6 drift baseline) apply per request in this mode. The T7 initialize
+    # handshake gate does not apply to stateless requests (the 2026-07-28
+    # protocol has no initialize); it still governs legacy sessions.
+    allow_stateless_requests: bool = False
 
 
 @dataclass(frozen=True)
@@ -443,10 +458,25 @@ def load_config(path: str | Path) -> ArmorConfig:
                 if t7_raw.get("allowed_meta_keys") is not None
                 else None
             ),
+            allow_stateless_requests=bool(t7_raw.get("allow_stateless_requests", False)),
         )
         if t7_raw is not None
         else None
     )
+
+    raw_t7 = threats.get("T7", {})
+    if (t7 is None and isinstance(raw_t7, dict)
+            and bool(raw_t7.get("allow_stateless_requests", False))):
+        raise ConfigError(
+            "T7.allow_stateless_requests is set but T7 is disabled — stateless "
+            "requests need T7 session verification and the envelope engine"
+        )
+    if t7 is not None and t7.allow_stateless_requests and not t7.enforce_request_envelope:
+        raise ConfigError(
+            "T7.allow_stateless_requests requires T7.enforce_request_envelope: true — "
+            "a session-less MCP 2026-07-28 request is only safe to route after its "
+            "headers, body and _meta identity claims have been checked"
+        )
 
     # T8
     t8_raw = _t("T8")

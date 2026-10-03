@@ -61,8 +61,82 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
   process-wide. Code calling `ValidationEngine.on_response` directly to seed
   schemas must use `guard.register_tool_schemas()` or the guard round trip.
 
-Not yet: stateless (session-less) MCP 2026-07-28 requests through
-ArmorMiddleware/sidecar — they still require `Mcp-Session-Id`.
+- Stateless MCP 2026-07-28 requests through ArmorMiddleware and the sidecar,
+  opt-in via `T7.allow_stateless_requests` (requires
+  `T7.enforce_request_envelope`; `CoSAIGuard(..., allow_stateless=True)` requires
+  an `EnvelopeEngine`). A request without `Mcp-Session-Id` is admitted only when
+  `params._meta` carries a protocol version; it runs the full guard chain on a
+  fresh one-request context — opened and closed around the request (T12
+  `session_start`/`session_end` bracket), never persisted, and no session id is
+  issued. T10 call/wall-clock budgets and the T6 drift baseline apply per
+  request in this mode (startup warning); the initialize-handshake gate does
+  not apply to stateless requests (startup warning when both are on). Legacy
+  session traffic is unchanged. Requires a `SessionEngine` (T7). `server/discover`
+  passes T2 default-deny only on stateless requests. T2-004 destructive
+  confirmation on stateless requests is bound to the authenticated principal +
+  tenant + arguments (fails closed without a principal).
+
+### Security — changed
+- T2-004 confirmation tokens are now bound to the exact arguments (minus
+  `_confirm_token`) on legacy sessions too, with kind-tagged bindings so a
+  session id can never collide with a stateless binding: an approval for one
+  argument set cannot execute another.
+- `CoSAIGuard.close_session` runs every engine's `on_session_end` even if one
+  fails (first failure re-raised afterwards).
+- ArmorMiddleware (and the sidecar) now rejects request bodies (and, when
+  response scanning is active, upstream responses) with duplicate JSON object
+  keys — exact, or colliding under Unicode case folding (case-insensitive
+  upstream decoders such as Go `encoding/json`) — `NaN`/`Infinity`, or numbers that overflow to infinity
+  (-32700). The original bytes are forwarded upstream, so Python's last-wins
+  reading could differ from a first-wins upstream parser on the tool name or
+  arguments the guard authorized, scanned or bound a T2-004 approval to.
+- Envelope/params keys that equal a protocol field only under case folding
+  (`NAME`, `ARGUMENTS`, `_META`, `Method`, …) are rejected (-32700): a
+  case-insensitive upstream decoder reads them as the real field while the
+  guard would see it as absent. Case-fold collisions are checked on envelope
+  objects only (top level, params, arguments, _meta; response top level,
+  result, error) — schemas and results may carry case-variant keys.
+- Tool arguments with a key (at any depth) that equals a property name
+  declared anywhere in the tool's schema (incl. `$ref`/`$defs`, `allOf`/
+  `anyOf`/`oneOf`, `additionalProperties`, `items`) only in letter case are
+  rejected by T3 (`ValidationEngine`) and the envelope `Mcp-Param-*` check;
+  free-form keys that fold onto no declared name are unaffected. Known
+  conservative trade-off: a free-form map key such as `ID` is rejected when
+  `id` is declared anywhere in the schema, and spellings declared in
+  different `properties` mappings (e.g. `id` at the top, `ID` nested) are
+  rejected wherever they appear; spellings declared together (`a`/`A` in one
+  mapping) pass. A schema too large to walk fails closed. Case-variant protocol fields in upstream
+  responses (result, error, and tools/content/contents/messages/resources/
+  prompts elements) fail closed when the response is inspected.
+- T3, T4 (prompt injection), T8 (SSRF), T10 (depth) and the envelope
+  `Mcp-Param-*` check also use the decoded value of top-level string arguments
+  that hold JSON (T3 additionally validates it against the property schema);
+  a JSON-looking argument nested deeper than 64 levels is rejected (-32602) so
+  the verdict never depends on the guard's own stack depth (conservative:
+  bracket-heavy text starting with `[`/`{` deeper than 64 is rejected even if
+  it is not valid JSON). Schema validation of the decoded value follows T3-005
+  (`strict_schema` only); the scans always run. These are
+  top-level string arguments that hold JSON
+  objects/arrays (the official MCP Python SDK `json.loads` such arguments for
+  non-`str` parameters): `\uXXXX`-escaped `;`, `|`, `../` no longer pass as
+  literal text.
+- `@guard.protect` and the FastMCP per-tool hook scan a faithful plain-data
+  view of tool kwargs (pydantic model attributes incl. excluded/serializer-
+  masked fields and extras, dataclass fields, secret values, bytes, mappings,
+  iterables); lazy `Iterable[...]` arguments are materialised once and the tool
+  receives that same list; argument types with no faithful view are rejected
+  instead of scanning
+  their repr (allowed as text: dates/times/timezones, decimals, UUIDs, paths,
+  IP addresses, pydantic URLs, regex patterns; numbers incl. numpy scalars;
+  enums by value). Model-typed arguments were previously skipped by T3/T4/T8.
+  Keys that stringify alike and extras shadowing an aliased field are all kept;
+  lazy iterators are materialised up to 10,000 items per call and the scan view
+  up to 100,000 entries; values whose attributes or iteration raise are rejected.
+- AuthzEngine keys tools/call and prompts/get only by an exact string `name`
+  and resources/* only by `uri` (no cross-field fallback); a missing subject is
+  denied.
+- T2-004 pending confirmations are capped (10,000 total, 64 per session or
+  stateless principal, 256 per principal across sessions; fail closed).
 
 ### Security — fixed (2026-07-17 three-layer audit remediation)
 
