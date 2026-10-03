@@ -333,6 +333,9 @@ class ValidationEngine:
                 self._scan_all_strings(item, f"{field}[{i}]", leaf_key)
         elif isinstance(value, dict):
             for k, v in value.items():
+                # keys are attacker text like values; never prose (the BUG-46
+                # redirect exemption applies to values of prose fields only)
+                self._scan_injection(str(k), f"{field}.<key>", is_prose=False)
                 self._scan_all_strings(v, f"{field}.{k}", k)
 
     def _validate_schema(self, arguments: object, schema: dict[str, Any], tool_name: str) -> None:

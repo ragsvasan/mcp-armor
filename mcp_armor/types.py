@@ -156,7 +156,12 @@ def materialize_iterators(kwargs: dict[str, Any]) -> dict[str, Any]:
 def _view_mapping(items: Any, depth: int, seen: set[int], budget: list[int]) -> dict[str, Any]:
     """Scan view of key/value pairs. Every entry is charged to the shared item
     budget (diamond-shaped graphs cannot expand unbounded) and keys that
-    stringify alike (``1`` vs ``"1"``) are all kept, never overwritten."""
+    stringify alike (``1`` vs ``"1"``) are all kept, never overwritten.
+    Non-str keys are viewed like values (SecretStr unwrapped, bytes decoded,
+    enums by value, tuples / ``None`` as JSON text — ``None`` -> ``"null"``),
+    charged to the same depth and item budget; unviewable key types fail."""
+    import json as _json
+
     out: dict[str, Any] = {}
     collisions: dict[str, int] = {}
     for k, v in items:
@@ -165,7 +170,10 @@ def _view_mapping(items: Any, depth: int, seen: set[int], budget: list[int]) -> 
             from .exceptions import ValidationError
 
             raise ValidationError("Tool argument has too many items to scan")
-        base = key = str(k)
+        # Key text as the tool reads it (SecretStr unwrapped, bytes decoded,
+        # enums by value) — never a masked or repr'd str(k).
+        kv = k if isinstance(k, str) else _scan_view(k, depth + 1, seen, budget)
+        base = key = kv if isinstance(kv, str) else _json.dumps(kv, default=str)
         while key in out:
             collisions[base] = n = collisions.get(base, 0) + 1
             key = f"{base}\x00{type(k).__name__}\x00{n}"
@@ -356,6 +364,24 @@ def _bracket_depth(text: str) -> int:
         elif ch in "]}":
             depth -= 1
     return best
+
+
+# Single hyphens only (``X-Api-Key``): ``id--`` is an SQL comment, not a name.
+_STRUCTURAL_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*")
+
+
+def is_structural_key(key: object) -> bool:
+    """True for identifier-like mapping keys (``content_type``, ``X-Api-Key``):
+    letters, digits, ``_``, single ``-`` separators, at most 64 characters.
+
+    Argument scanners (T3/T4/T8) scan every other key as text: a
+    ``dict[str, X]`` tool parameter (file map, headers, env, labels) hands its
+    keys to the tool body, so ``{"../../etc/x": ...}``, a URL, ``id--`` or a
+    prose key is attacker data. T3 (ValidationEngine) and T4 (BoundaryEngine)
+    scan EVERY key with the same patterns as values; only T8 (NetworkEngine)
+    skips identifier-like keys, which cannot hold a URL."""
+    return (isinstance(key, str) and len(key) <= 64
+            and _STRUCTURAL_KEY_RE.fullmatch(key) is not None)
 
 
 def scannable_strings(req: MCPRequest) -> dict[str, Any]:

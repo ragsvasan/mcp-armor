@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from ..context import CoSAIContext
 from ..exceptions import NetworkBindingError
-from ..types import MCPRequest, MCPResponse, scannable_strings
+from ..types import MCPRequest, MCPResponse, is_structural_key, scannable_strings
 
 _RFC1918 = [
     ipaddress.ip_network("10.0.0.0/8"),
@@ -295,7 +295,9 @@ class NetworkEngine:
                         "to a blocked address range (T8-002)"
                     )
         elif isinstance(value, dict):
-            for v in value.values():
+            for k, v in value.items():
+                if not is_structural_key(k):          # attacker-chosen key text
+                    self._scan_args_for_ssrf(str(k))
                 self._scan_args_for_ssrf(v)
         elif isinstance(value, list):
             for item in value:

@@ -132,6 +132,15 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
   Keys that stringify alike and extras shadowing an aliased field are all kept;
   lazy iterators are materialised up to 10,000 items per call and the scan view
   up to 100,000 entries; values whose attributes or iteration raise are rejected.
+- T3/T4/T8 argument scanners also scan mapping keys (`dict[str, X]` file maps,
+  headers, env, labels): a key such as `../../etc/x`, `id--`, a URL, a prose
+  sentence or a base64 payload was previously never scanned on any path. T3 and
+  T4 scan every key with the same patterns as values (keys get no prose-field
+  exemption — prose-field names relax only the redirect check, for values
+  only); T8 skips identifier-like keys, which cannot hold a URL (letters,
+  digits, `_`, single `-` separators, ≤64 chars). On decorator paths non-str
+  keys are scanned as the tool reads them (SecretStr unwrapped, bytes decoded,
+  enums by value, tuples as JSON text); unviewable key types are rejected.
 - AuthzEngine keys tools/call and prompts/get only by an exact string `name`
   and resources/* only by `uri` (no cross-field fallback); a missing subject is
   denied.

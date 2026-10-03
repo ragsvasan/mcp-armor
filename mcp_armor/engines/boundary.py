@@ -301,13 +301,18 @@ class BoundaryEngine:
         Recursively find and scan all string values in a dict/list/scalar.
 
         Returns the first matched pattern string, or None.
-        Only string leaf values are tested; structural keys are not scanned
-        (to avoid false positives on field names like 'instructions').
+        String leaves and mapping keys are tested with the same patterns
+        (field names like 'instructions' match no pattern on their own).
         """
         if isinstance(obj, str):
             return self._scan(obj)
         if isinstance(obj, dict):
-            for v in obj.values():
+            for k, v in obj.items():
+                # Keys are attacker text exactly like values (dict[str, X]
+                # labels/headers reach the LLM): same full scan, no exemption.
+                matched = self._scan(str(k))
+                if matched:
+                    return matched
                 matched = self._scan_values(v)
                 if matched:
                     return matched
