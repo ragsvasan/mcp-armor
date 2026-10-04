@@ -61,7 +61,7 @@ match the source of truth.
 | Typed `ArmorConfig` / `cosai.yaml` loader | ✅ Implemented |
 | CI — GitHub Actions matrix (3.11/3.12) | ✅ Live |
 | PyPI trusted publisher workflow | ✅ Ready |
-| Test suite | ✅ 577 tests, 90%+ coverage |
+| Test suite | ✅ 1073 tests, 90%+ coverage |
 | Examples | ✅ quickstart (boots with `ARMOR_SESSION_SECRET` only), fastmcp_basic, fastapi_basic, custom_engine, cosai_yaml_full |
 | Docs | ✅ All current |
 
@@ -115,6 +115,7 @@ mcp_armor/
   meta_identity.py     Shared identity-key predicate (_meta, baggage, tracestate)
   mcp_protocol.py      MCP 2026-07-28 constants + header helpers
   tracecontext.py      W3C trace context rules (LO-03)
+  ocsf.py              OCSF API Activity (6003) builder, cosai_agentic fields (LO-01/LO-04)
   exceptions.py        12 typed exceptions + JSON-RPC codes
   engines/
     base.py            ProtectionEngine Protocol

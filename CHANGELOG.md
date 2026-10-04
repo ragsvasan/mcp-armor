@@ -25,6 +25,23 @@ Until `v1.1.0` is tagged and published, PyPI's latest remains `1.0.2`.
 
 ## [Unreleased]
 
+### Added — CoSAI v2.0 follow-ups
+
+- `mcp_armor.ocsf.build_mcp_api_activity` — OCSF API Activity (class 6003)
+  event per MCP request with the CoSAI v2.0 agentic extension
+  (`unmapped.cosai_agentic`: delegation_path, attestation_state,
+  correlation_id, mcp_method, mcp_name, trace_id, decision). Parameters are
+  only ever an HMAC-SHA256 under a ≥32-byte deployment key — never raw, and
+  omitted without a key (LO-01). Shape is identical to cosai-mcp's builder
+  (test-enforced).
+
+### Changed
+
+- `RequestStateSealer` rejects non-random sealing keys (fewer than 16 distinct
+  byte values, or all printable ASCII — a passphrase, not a key) for every
+  configured kid, with a `ValueError` naming the kid. Generate keys with
+  `os.urandom(32)` / `secrets.token_bytes(32)` or a KMS.
+
 ### Added — CoSAI MCP Security v2.0 / MCP 2026-07-28 parity with cosai-mcp P2
 
 - `mcp_armor.explicit_state` — `RequestStateSealer` (AES-256-GCM sealed MRTR

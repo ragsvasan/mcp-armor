@@ -4,6 +4,7 @@ reconciliation (SD-02) and W3C trace context (LO-03)."""
 from __future__ import annotations
 
 import base64
+import hashlib
 from typing import Any
 
 import pytest
@@ -37,6 +38,9 @@ from mcp_armor.tracecontext import (
     sanitize_baggage,
 )
 
+_K1 = hashlib.sha256(b"test-key-1").digest()
+_K2 = hashlib.sha256(b"test-key-2").digest()
+
 
 class _Clock:
     def __init__(self, t: float = 1_000_000.0) -> None:
@@ -54,7 +58,7 @@ RID = request_fingerprint("tools/call", PARAMS)
 
 def _sealer(**kw: Any) -> RequestStateSealer:
     kw.setdefault("audience", "https://mcp.example/mcp")
-    return RequestStateSealer({"k1": b"\x01" * 32}, active_kid="k1", **kw)
+    return RequestStateSealer({"k1": _K1}, active_kid="k1", **kw)
 
 
 class TestRequestStateSealer:
@@ -119,13 +123,13 @@ class TestRequestStateSealer:
             s.open(token, tenant="t", principal="alice", request_id=RID)
 
     def test_key_rotation(self) -> None:
-        old = RequestStateSealer({"k1": b"\x01" * 32}, active_kid="k1", audience="aud")
+        old = RequestStateSealer({"k1": _K1}, active_kid="k1", audience="aud")
         token = old.seal({"a": 1}, tenant="t", principal="alice", request_id=RID)
-        rotated = RequestStateSealer({"k1": b"\x01" * 32, "k2": b"\x02" * 32},
+        rotated = RequestStateSealer({"k1": _K1, "k2": _K2},
                                      active_kid="k2", audience="aud")
         assert rotated.open(token, tenant="t", principal="alice", request_id=RID) == {"a": 1}
         assert rotated.seal({}, tenant="t", principal="alice", request_id=RID).startswith("v1.k2.")
-        retired = RequestStateSealer({"k2": b"\x02" * 32}, active_kid="k2", audience="aud")
+        retired = RequestStateSealer({"k2": _K2}, active_kid="k2", audience="aud")
         with pytest.raises(StateVerificationError):
             retired.open(token, tenant="t", principal="alice", request_id=RID)
 
@@ -147,8 +151,8 @@ class TestRequestStateSealer:
     @pytest.mark.parametrize("kwargs", [
         {"keys": {}, "active_kid": "k1"},
         {"keys": {"k1": b"short"}, "active_kid": "k1"},
-        {"keys": {"k1": b"\x01" * 32}, "active_kid": "k2"},
-        {"keys": {"bad kid!": b"\x01" * 32}, "active_kid": "bad kid!"},
+        {"keys": {"k1": _K1}, "active_kid": "k2"},
+        {"keys": {"bad kid!": _K1}, "active_kid": "bad kid!"},
     ])
     def test_config_validation(self, kwargs: dict[str, Any]) -> None:
         with pytest.raises(ValueError):
@@ -449,7 +453,7 @@ class TestStateRegressions:
             s.seal({}, tenant="t", principal="a", request_id=RID)
 
     def test_exploit_requeststate_replay_default_rejected(self) -> None:
-        s = RequestStateSealer({"k1": b"\x01" * 32}, active_kid="k1", audience="aud")
+        s = RequestStateSealer({"k1": _K1}, active_kid="k1", audience="aud")
         tok = s.seal({}, tenant="t", principal="a", request_id=RID)
         s.open(tok, tenant="t", principal="a", request_id=RID)
         with pytest.raises(StateVerificationError):
@@ -457,7 +461,7 @@ class TestStateRegressions:
 
     def test_regression_single_use_shared_store_atomic(self) -> None:
         store = _Store()
-        keys = {"k1": b"\x01" * 32}
+        keys = {"k1": _K1}
         a = RequestStateSealer(keys, active_kid="k1", audience="aud", spent_store=store)
         b = RequestStateSealer(keys, active_kid="k1", audience="aud", spent_store=store)
         tok = a.seal({}, tenant="t", principal="p", request_id=RID)
@@ -470,14 +474,14 @@ class TestStateRegressions:
             def add_if_absent(self, jti: str, expires_at: float) -> bool:
                 raise ConnectionError
 
-        s = RequestStateSealer({"k1": b"\x01" * 32}, active_kid="k1", audience="aud",
+        s = RequestStateSealer({"k1": _K1}, active_kid="k1", audience="aud",
                                spent_store=Broken())
         tok = s.seal({}, tenant="t", principal="p", request_id=RID)
         with pytest.raises(StateVerificationError):
             s.open(tok, tenant="t", principal="p", request_id=RID)
 
     def test_exploit_requeststate_cross_tenant_rejected(self) -> None:
-        keys = {"k1": b"\x01" * 32}
+        keys = {"k1": _K1}
         x = RequestStateSealer(keys, active_kid="k1", audience="https://x/mcp")
         y = RequestStateSealer(keys, active_kid="k1", audience="https://y/mcp")
         tok = x.seal({}, principal="p", tenant="A", request_id=RID)
@@ -636,9 +640,9 @@ def test_exploit_baggage_enduser_id_dropped_and_oversize_rejected() -> None:
 
 def test_exploit_requeststate_requires_audience_and_tenant() -> None:
     with pytest.raises(TypeError):
-        RequestStateSealer({"k1": b"\x01" * 32}, active_kid="k1")  # type: ignore[call-arg]
+        RequestStateSealer({"k1": _K1}, active_kid="k1")  # type: ignore[call-arg]
     with pytest.raises(ValueError):
-        RequestStateSealer({"k1": b"\x01" * 32}, active_kid="k1", audience="")
+        RequestStateSealer({"k1": _K1}, active_kid="k1", audience="")
     s = _sealer()
     with pytest.raises(TypeError):
         s.seal({}, principal="p", request_id=RID)  # type: ignore[call-arg]
@@ -1072,3 +1076,110 @@ def test_exploit_admin_key_mapping_value_cannot_smuggle_nested_claims() -> None:
     with pytest.raises(MetaTrustError):
         reconcile_meta(meta, ADMIN, allowed_keys=["acme/admin"])
     reconcile_meta({"acme/admin": True}, ADMIN)            # scalar restating scope is fine
+
+
+
+def test_regression_weak_sealing_keys_rejected() -> None:
+    import os
+
+    for weak in (b"\x00" * 32, b"\x01" * 32, bytes(range(8)) * 4,
+                 b"correct horse battery staple!!!!", b"k" * 32):
+        with pytest.raises(ValueError, match="non-random"):
+            RequestStateSealer({"k1": weak}, active_kid="k1", audience="aud")
+    with pytest.raises(ValueError, match="non-random"):   # any configured key, not just active
+        RequestStateSealer({"k1": os.urandom(32), "old": b"\x02" * 32},
+                           active_kid="k1", audience="aud")
+    for _ in range(200):
+        RequestStateSealer({"k1": os.urandom(32)}, active_kid="k1", audience="aud")
+
+
+# ===========================================================================
+# OCSF agentic API Activity (LO-01 / LO-04) — parity with cosai-mcp
+# ===========================================================================
+
+
+def test_ocsf_activity_has_agentic_fields_and_hashes_params() -> None:
+    import json
+
+    from mcp_armor.ocsf import build_mcp_api_activity
+
+    ev = build_mcp_api_activity(
+        server="https://mcp.example/mcp", mcp_method="tools/call", mcp_name="echo",
+        decision="deny", principal="alice", tenant="acme",
+        params={"password": "hunter2"}, params_key=_K1, correlation_id="c-1",
+        delegation_path=["user:alice", "agent:planner"], attestation_state="verified",
+        trace_id="0af7651916cd43dd8448eb211c80319c", reason="meta_mismatch",
+    ).to_dict()
+    agentic = ev["unmapped"]["cosai_agentic"]
+    assert ev["class_uid"] == 6003 and ev["metadata"]["product"]["name"] == "mcp-armor"
+    assert {"delegation_path", "attestation_state", "correlation_id", "mcp_method",
+            "mcp_name"} <= agentic.keys()
+    assert "hunter2" not in json.dumps(ev) and len(agentic["params_hmac_sha256"]) == 64
+    with pytest.raises(ValueError):
+        build_mcp_api_activity(server="s", mcp_method="m", decision="maybe")
+
+
+def test_regression_ocsf_no_digest_without_key_and_short_key_rejected() -> None:
+    from mcp_armor.ocsf import build_mcp_api_activity
+
+    ev = build_mcp_api_activity(server="s", mcp_method="tools/call", decision="allow",
+                                params={"id": 7}).to_dict()
+    assert ev["unmapped"]["cosai_agentic"]["params_hmac_sha256"] is None
+    with pytest.raises(ValueError):
+        build_mcp_api_activity(server="s", mcp_method="m", decision="allow",
+                               params={"a": 1}, params_key=b"short")
+    bad = build_mcp_api_activity(server="s", mcp_method="m", decision="allow",
+                                 params={"a": object()}, params_key=_K1).to_dict()
+    assert bad["unmapped"]["cosai_agentic"]["params_unserializable"] is True
+
+
+def test_regression_ocsf_matches_cosai_mcp_shape() -> None:
+    cosai = pytest.importorskip("cosai_mcp.telemetry.ocsf")
+    from mcp_armor.ocsf import build_mcp_api_activity
+
+    kw: dict[str, Any] = {"server": "s", "mcp_method": "tools/call", "decision": "deny",
+                          "principal": "p", "params": {"x": 1}, "params_key": _K1,
+                          "timestamp_ms": 1}
+    a = build_mcp_api_activity(**kw).to_dict()
+    b = cosai.build_mcp_api_activity(**kw).to_dict()
+    a["metadata"]["product"] = b["metadata"]["product"] = None
+    assert a == b
+
+
+
+def _golden_ocsf_event(product: str) -> dict[str, Any]:
+    """Golden OCSF 6003 event shared verbatim by cosai-mcp and mcp-armor tests
+    (only metadata.product differs) — keeps the two builders identical."""
+    import hmac
+
+    digest = hmac.new(_K1, b'{"q":1}', hashlib.sha256).hexdigest()
+    return {
+        "activity_id": 99, "activity_name": "Other",
+        "actor": {"tenant_uid": "acme", "user": {"uid": "alice"}},
+        "api": {"operation": "tools/call",
+                "service": {"name": "MCP", "uid": "https://mcp.example/mcp"}},
+        "category_name": "Application Activity", "category_uid": 6,
+        "class_name": "API Activity", "class_uid": 6003,
+        "metadata": {"correlation_uid": "c-1",
+                     "product": {"name": product, "vendor_name": "CoSAI"},
+                     "version": "2.0.0"},
+        "severity_id": 3, "status_id": 2, "time": 1, "type_uid": 600399,
+        "unmapped": {"cosai_agentic": {
+            "attestation_state": "verified", "correlation_id": "c-1", "decision": "deny",
+            "delegation_path": ["user:alice", "agent:planner"], "mcp_method": "tools/call",
+            "mcp_name": "echo", "params_hmac_sha256": digest,
+            "params_unserializable": False, "reason": "meta_mismatch",
+            "trace_id": "0af7651916cd43dd8448eb211c80319c"}},
+    }
+
+
+def test_regression_ocsf_golden_shape_without_cosai() -> None:
+    from mcp_armor.ocsf import build_mcp_api_activity as build
+
+    ev = build(server="https://mcp.example/mcp", mcp_method="tools/call", mcp_name="echo",
+               decision="deny", principal="alice", tenant="acme", params={"q": 1},
+               params_key=_K1, correlation_id="c-1",
+               delegation_path=["user:alice", "agent:planner"], attestation_state="verified",
+               trace_id="0af7651916cd43dd8448eb211c80319c", reason="meta_mismatch",
+               timestamp_ms=1).to_dict()
+    assert ev == _golden_ocsf_event("mcp-armor")

@@ -117,6 +117,14 @@ class SpentStore(Protocol):
         ...
 
 
+def _is_weak_key(key: bytes) -> bool:
+    """Heuristic guard against non-random sealing keys. 32 uniformly random
+    bytes have ~30 distinct values and are essentially never all printable
+    ASCII, so either condition means a constant, pattern or passphrase key
+    (a passphrase is not a key — derive one with HKDF/scrypt instead)."""
+    return len(set(key)) < 16 or all(0x20 <= b <= 0x7E for b in key)
+
+
 class RequestStateSealer:
     """Seal / open MRTR ``requestState`` with AES-256-GCM.
 
@@ -164,6 +172,11 @@ class RequestStateSealer:
                 raise ValueError(f"invalid key id {kid!r}")
             if len(key) != _KEY_BYTES:
                 raise ValueError("sealing keys must be exactly 32 bytes (AES-256)")
+            if _is_weak_key(key):
+                raise ValueError(
+                    f"sealing key {kid!r} looks non-random (repeated bytes or a "
+                    "printable passphrase) — generate it with os.urandom(32) / "
+                    "secrets.token_bytes(32) or a KMS")
         if not isinstance(audience, str) or not audience:
             raise ValueError("audience (this server's resource identifier) is required")
         if active_kid not in keys:
