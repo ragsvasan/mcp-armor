@@ -116,7 +116,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture, three-layer call
 
 ## Relation to cosai-mcp
 
-[cosai-mcp](https://github.com/cosai-oasis/cosai-mcp) is the black-box scanner — it probes your server from the outside. mcp-armor is the server-side SDK — it runs inside your server. They are complementary: use the scanner in CI to detect protocol-level failures, use mcp-armor at runtime for defence.
+[cosai-mcp](https://github.com/ragsvasan/cosai-mcp) is the black-box scanner — it probes your server from the outside. mcp-armor is the server-side SDK — it runs inside your server. They are complementary: use the scanner in CI to detect protocol-level failures, use mcp-armor at runtime for defence.
 
 ## vs. commercial agentic-AI platforms (CrowdStrike, et al.)
 

@@ -107,7 +107,7 @@ The scanner and mcp-armor cover different parts of the threat surface. Use both.
 
 ## Positioning vs. commercial platforms
 
-CrowdStrike's *"AI Agent Security: A Practical 90-Day Roadmap for Securing Agentic AI"* defines an 8-workstream roadmap and sells its implementation as a closed Falcon module. mcp-armor (runtime enforcement) + [cosai-mcp](https://github.com/cosai-oasis/cosai-mcp) (CI-time proof) implement the same control set as OSS, anchored on cryptographic verification rather than vendor trust.
+CrowdStrike's *"AI Agent Security: A Practical 90-Day Roadmap for Securing Agentic AI"* defines an 8-workstream roadmap and sells its implementation as a closed Falcon module. mcp-armor (runtime enforcement) + [cosai-mcp](https://github.com/ragsvasan/cosai-mcp) (CI-time proof) implement the same control set as OSS, anchored on cryptographic verification rather than vendor trust.
 
 Honest status — *shipped* vs *roadmap*:
 
