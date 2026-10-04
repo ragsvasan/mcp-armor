@@ -95,6 +95,21 @@ mcp-armor-sidecar --config cosai.yaml --upstream http://localhost:3000
 
 The sidecar ships as the `mcp_armor.sidecar` module (`python -m mcp_armor.sidecar`), a console script, and a Docker image. It covers **HTTP transport only** and adds **~0.4 ms p50** per request (loopback hop, benchmarked on Apple M5). See [docs/TYPESCRIPT.md](docs/TYPESCRIPT.md) for the full setup guide, configuration flags, Docker Compose example, benchmarks, and the stdio limitation.
 
+## CoSAI MCP Security v2.0 / MCP 2026-07-28
+
+Opt-in support for the stateless 2026-07-28 protocol and the v2.0 assurance controls (unreleased — see [CHANGELOG.md](CHANGELOG.md)):
+
+| v2.0 control | mcp-armor | Enable |
+|---|---|---|
+| TN-04 / SD-02 header ↔ body and `_meta` ↔ principal checks | `EnvelopeEngine`, `request_envelope` | `threats.T7.enforce_request_envelope: true` |
+| Stateless (session-less) requests | `ArmorMiddleware` / sidecar | `threats.T7.allow_stateless_requests: true` (requires the envelope) |
+| SD-03 sealed `requestState` | `explicit_state.RequestStateSealer` (rejects non-random keys) | library |
+| SD-01 server-held task handles | `explicit_state.HandleRegistry` | library |
+| LO-03 W3C trace context | `tracecontext` | library |
+| LO-01 / LO-04 OCSF agentic audit events | `ocsf.build_mcp_api_activity` (params only as keyed HMAC) | library |
+
+Envelope checks see headers and `_meta` only behind `ArmorMiddleware` or the sidecar, not on `@guard.protect` / the FastMCP hook. On every path T3/T4/T8 scan tool-argument mapping keys as well as values.
+
 ## Design
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture, three-layer call path model, and design decisions.
